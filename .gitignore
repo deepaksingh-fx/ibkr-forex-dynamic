@@ -1,0 +1,33 @@
+# Runtime / sensitive
+account_balances.json
+strategy_state.json
+*.log
+live.log
+dryrun.log
+
+# Generated reports
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+*.egg-info/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local overrides
+.env
+.env.local

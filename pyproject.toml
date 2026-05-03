@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live_ibkr: tests that hit a running IB Gateway (gated by RUN_IBKR_LIVE=1)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
