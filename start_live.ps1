@@ -14,7 +14,8 @@
 #     per-day cap 1%; LIVE TRADING ON; --force-clean-restart
 #   - Streams logs to terminal AND appends to bot.log
 
-$ErrorActionPreference = 'Stop'
+# Don't abort on stderr from python (logging writes to stderr by default).
+$ErrorActionPreference = 'Continue'
 
 Write-Host ''
 Write-Host '========================================================' -ForegroundColor Cyan
