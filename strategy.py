@@ -65,6 +65,16 @@ class StateMismatchError(RuntimeError):
     """Raised at startup when persisted state ≠ IBKR positions."""
 
 
+class ConnectionLostError(RuntimeError):
+    """Raised when the IBKR socket drops mid-session — caught by run() to
+    drive automatic reconnect + resume via the reconciler."""
+
+
+# Reconnect backoff (seconds): start at 5s, double on each failure, cap at 60s.
+RECONNECT_BACKOFF_INITIAL_S = 5.0
+RECONNECT_BACKOFF_MAX_S = 60.0
+
+
 # ─── Per-pair state (across all accounts) ─────────────────────────────────
 @dataclass
 class _Position:
@@ -113,51 +123,110 @@ class Strategy:
 
     # ───────────────────────── entry point ─────────────────────────
     async def run(self) -> None:
-        await self.ibkr.connect()
+        """
+        Outer loop. Maintains the IBKR connection and re-runs the session
+        across reconnects. A short daily relogin to IB Gateway will drop the
+        socket; we detect it, sleep with backoff, reconnect, and let the
+        reconciler resume any in-flight state.
+        """
+        backoff_s = RECONNECT_BACKOFF_INITIAL_S
         try:
             while not self._stop.is_set():
-                # Trading-zone gate.
-                while not is_in_trading_zone(ny_now()):
-                    logger.info(
-                        "Outside trading zone (Sun 17:00 → Fri 17:00 NY); "
-                        f"sleeping {TRADING_ZONE_POLL_SECONDS}s..."
-                    )
-                    try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=TRADING_ZONE_POLL_SECONDS)
-                        return  # _stop set
-                    except asyncio.TimeoutError:
-                        continue
+                try:
+                    if not self.ibkr.is_connected:
+                        logger.info("Connecting to IBKR...")
+                        await self.ibkr.connect()
+                        backoff_s = RECONNECT_BACKOFF_INITIAL_S   # reset on success
 
-                # In zone — bootstrap and run a session.
-                await self._run_session()
+                    # Trading-zone gate.
+                    while (not is_in_trading_zone(ny_now())
+                            and not self._stop.is_set()):
+                        if not self.ibkr.is_connected:
+                            raise ConnectionLostError("disconnected while waiting for zone")
+                        logger.info(
+                            "Outside trading zone (Sun 17:00 → Fri 17:00 NY); "
+                            f"sleeping {TRADING_ZONE_POLL_SECONDS}s..."
+                        )
+                        await self._interruptible_sleep(TRADING_ZONE_POLL_SECONDS)
+                    if self._stop.is_set():
+                        break
+
+                    # In zone — bootstrap and run a session.
+                    await self._run_session()
+                except StateMismatchError:
+                    # Reconciler refused to start — propagate; user must intervene.
+                    raise
+                except ConnectionLostError as e:
+                    logger.warning(
+                        f"Connection lost ({e}); reconnecting in {backoff_s:.0f}s"
+                    )
+                    await self._safe_disconnect()
+                    await self._interruptible_sleep(backoff_s)
+                    backoff_s = min(backoff_s * 2, RECONNECT_BACKOFF_MAX_S)
+                except Exception:
+                    logger.exception(
+                        f"Unexpected session error; reconnecting in {backoff_s:.0f}s"
+                    )
+                    await self._safe_disconnect()
+                    await self._interruptible_sleep(backoff_s)
+                    backoff_s = min(backoff_s * 2, RECONNECT_BACKOFF_MAX_S)
         finally:
-            await self.ibkr.disconnect()
+            await self._safe_disconnect()
 
     def stop(self) -> None:
         self._stop.set()
 
+    async def _safe_disconnect(self) -> None:
+        """Best-effort disconnect; clears in-memory pair_states so the next
+        session re-bootstraps cleanly via the reconciler. State on disk is
+        untouched — open positions persist across reconnect."""
+        self.pair_states.clear()
+        try:
+            await self.ibkr.disconnect()
+        except Exception:
+            logger.exception("disconnect failed (continuing)")
+
+    async def _interruptible_sleep(self, secs: float) -> None:
+        """Sleep up to `secs`, returning early if _stop is set."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=secs)
+        except asyncio.TimeoutError:
+            pass
+
     # ───────────────────────── one session = one trading-week segment ─────────────────────────
     async def _run_session(self) -> None:
-        """Run from 'now' (inside zone) until we exit the zone (Fri 17:00 NY)."""
-        await self._bootstrap_accounts()
-        # Reconcile against IBKR before any subscription — fail loud on mismatch.
-        await self._reconcile_with_ibkr()
-        await self._bootstrap_selection_and_subscribe()
-        self._restore_positions_from_persisted()
-        # Save fresh state after bootstrap completes.
-        self._save_state()
+        """
+        Run from 'now' (inside zone) until we exit the zone (Fri 17:00 NY)
+        OR the IBKR socket drops. On socket drop, raises ConnectionLostError
+        — caller catches and reconnects.
+        """
+        try:
+            await self._bootstrap_accounts()
+            # Reconcile against IBKR before any subscription — fail loud on mismatch.
+            await self._reconcile_with_ibkr()
+            await self._bootstrap_selection_and_subscribe()
+            self._restore_positions_from_persisted()
+            # Save fresh state after bootstrap completes.
+            self._save_state()
 
-        # Active loop: wait for bar updates and react. Periodically wake to
-        # check the zone gate. Streams handle the rest via callbacks.
-        while is_in_trading_zone(ny_now()) and not self._stop.is_set():
-            try:
-                await asyncio.wait_for(self._bar_evt.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
-                pass
-            self._bar_evt.clear()
+            # Active loop: wait for bar updates and react. Periodically wake
+            # to check the zone gate AND connection health.
+            while is_in_trading_zone(ny_now()) and not self._stop.is_set():
+                if not self.ibkr.is_connected:
+                    raise ConnectionLostError("ib socket dropped during session")
+                try:
+                    await asyncio.wait_for(self._bar_evt.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    pass
+                self._bar_evt.clear()
 
-        # Exited the zone — clean up streams.
-        await self._teardown_streams()
+            # Exited the zone (or stop) — clean teardown WITH force-exit.
+            await self._teardown_streams(force_exit_positions=True)
+        except ConnectionLostError:
+            # Socket is dead — placing exit orders would just fail. State on
+            # disk is intact; the reconciler will resume positions on reconnect.
+            await self._teardown_streams(force_exit_positions=False)
+            raise
 
     # ───────────────────────── account bootstrap ─────────────────────────
     async def _bootstrap_accounts(self) -> None:
@@ -280,12 +349,59 @@ class Strategy:
                 for acct, pos in by_acct.items():
                     expected[(pair, acct)] = pos.side
 
+        # Sub-threshold FX positions (<20k base ccy) don't appear in
+        # reqPositionsAsync — they settle into the multi-currency cash ledger.
+        # For any expected (pair, account) missing from `relevant`, probe the
+        # cash ledger; if the non-USD leg has a sign-consistent balance, treat
+        # it as a match.
+        ledger_cache: Dict[str, Dict[str, float]] = {}
+        for key, side in expected.items():
+            if key in relevant:
+                continue
+            pair, acct = key
+            if acct not in ledger_cache:
+                try:
+                    ledger_cache[acct] = await self.ibkr.fetch_cash_ledger(acct)
+                except Exception:
+                    logger.exception(f"fetch_cash_ledger({acct}) failed during reconciliation")
+                    ledger_cache[acct] = {}
+            ledger = ledger_cache[acct]
+            base, quote = pair[:3], pair[3:]
+            for ccy in (base, quote):
+                if ccy == "USD":
+                    continue   # account base — indistinguishable from natural cash
+                bal = ledger.get(ccy, 0.0)
+                if abs(bal) < 1.0:
+                    continue
+                # Sign convention:
+                #   +base ccy balance  → LONG (we bought base, so we're holding base)
+                #   -base ccy balance  → SHORT
+                #   +quote ccy balance → SHORT (we sold base to get quote)
+                #   -quote ccy balance → LONG
+                if ccy == base:
+                    implied_side = "LONG" if bal > 0 else "SHORT"
+                    qty = bal
+                else:
+                    implied_side = "SHORT" if bal > 0 else "LONG"
+                    qty = -bal
+                if implied_side == side:
+                    relevant[key] = {"qty": qty, "avg_cost": 0.0, "via_ledger": True}
+                    logger.info(
+                        f"Reconciliation: {pair} {acct} {side} matched via cash "
+                        f"ledger ({ccy}={bal:+.2f}) — sub-threshold IDEALPRO position"
+                    )
+                    break
+
         issues: List[str] = []
 
         # State expects but IBKR doesn't have:
         for key, side in expected.items():
             if key not in relevant:
-                issues.append(f"State expects {key[0]} {side} for {key[1]} but IBKR has no position")
+                issues.append(
+                    f"State expects {key[0]} {side} for {key[1]} but IBKR has no "
+                    f"matching position (reqPositions empty AND cash ledger has "
+                    f"no sign-consistent {key[0][:3]}/{key[0][3:]} balance)"
+                )
 
         # IBKR has but state doesn't expect:
         for key, info in relevant.items():
@@ -446,16 +562,34 @@ class Strategy:
             logger.info(f"{sym}: subscribed to streaming 5-min bars")
 
     # ───────────────────────── teardown ─────────────────────────
-    async def _teardown_streams(self) -> None:
+    async def _teardown_streams(self, force_exit_positions: bool = True) -> None:
+        """
+        Cancel streaming bars; optionally force-exit open positions.
+
+        force_exit_positions=True (zone-exit at Fri 17:00 NY):
+            close every open position via _exit_position.
+        force_exit_positions=False (socket disconnect):
+            leave positions untouched — orders can't fly anyway, and the
+            reconciler resumes state on reconnect.
+        """
         for sym, ps in self.pair_states.items():
             if ps.bars_handle is not None:
-                self.ibkr.cancel_stream(ps.bars_handle)
+                try:
+                    self.ibkr.cancel_stream(ps.bars_handle)
+                except Exception:
+                    logger.exception(f"cancel_stream({sym}) failed; continuing")
                 ps.bars_handle = None
-        # Also force-exit any open positions before leaving the zone.
-        for sym, ps in self.pair_states.items():
-            for acct, pos in ps.positions.items():
-                if pos is not None:
-                    await self._exit_position(ps, acct, reason="ZONE_EXIT", current_price=pos.entry_price)
+        if force_exit_positions:
+            for sym, ps in self.pair_states.items():
+                for acct, pos in ps.positions.items():
+                    if pos is not None:
+                        try:
+                            await self._exit_position(
+                                ps, acct, reason="ZONE_EXIT",
+                                current_price=pos.entry_price,
+                            )
+                        except Exception:
+                            logger.exception(f"force-exit failed {acct} {sym}")
         self.pair_states.clear()
 
     # ───────────────────────── bar handler factory ─────────────────────────
@@ -599,26 +733,83 @@ class Strategy:
 
     async def _open_position(self, ps: _PairState, acct: str,
                               side: str, price: float, t: datetime) -> None:
+        """
+        Submit an entry order. Only record state if IBKR confirms the fill
+        (or we're in dry-run mode). On rejection/timeout: do NOT record,
+        halt the account so we don't keep firing into a broken state.
+        """
         ibkr_side = "BUY" if side == "LONG" else "SELL"
-        await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
-        ps.positions[acct] = _Position(side=side, entry_price=price, entry_time=t)
-        self.pnl.on_entry(acct, ps.symbol, side, price, LOT_UNITS)
-        logger.info(f"[{acct}] {ps.symbol} OPEN_{side} @{price:.5f} (CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f})")
+        result = await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
+        status = result.get("status")
+
+        if status == "filled":
+            entry_px = result.get("fill_price") or price
+            ps.positions[acct] = _Position(side=side, entry_price=entry_px, entry_time=t)
+            self.pnl.on_entry(acct, ps.symbol, side, entry_px, LOT_UNITS)
+            logger.info(
+                f"[{acct}] {ps.symbol} OPEN_{side} @{entry_px:.5f} "
+                f"(CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f})"
+            )
+            self._save_state()
+            return
+
+        if status == "dry_run":
+            ps.positions[acct] = _Position(side=side, entry_price=price, entry_time=t)
+            self.pnl.on_entry(acct, ps.symbol, side, price, LOT_UNITS)
+            logger.info(
+                f"[{acct}] {ps.symbol} OPEN_{side} @{price:.5f} "
+                f"(CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f}) [DRY-RUN]"
+            )
+            self._save_state()
+            return
+
+        # Entry rejected/timeout → no fill happened; do NOT record state.
+        # Halt the account to stop further automated activity until reviewed.
+        err = result.get("error") or "unknown error"
+        logger.error(
+            f"[{acct}] {ps.symbol} ENTRY_REJECTED side={side} status={status} "
+            f"reason={err} — no position opened, halting account"
+        )
+        ps.halted[acct] = True
         self._save_state()
 
     async def _exit_position(self, ps: _PairState, acct: str,
                               reason: str, current_price: float) -> None:
+        """
+        Submit an exit order. On confirmed fill (or dry-run), clear state.
+        On rejection/timeout: KEEP the in-memory state — the position likely
+        still exists at IBKR — and halt the account. This is a CRITICAL
+        condition that requires manual intervention.
+        """
         pos = ps.positions.get(acct)
         if pos is None:
             return
         ibkr_side = "SELL" if pos.side == "LONG" else "BUY"
-        await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
-        realized = self.pnl.on_exit(acct, ps.symbol)
-        logger.info(
-            f"[{acct}] {ps.symbol} {reason}  side={pos.side} "
-            f"entry={pos.entry_price:.5f} → {current_price:.5f} realized≈${realized:.2f}"
+        result = await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
+        status = result.get("status")
+
+        if status in ("filled", "dry_run"):
+            realized = self.pnl.on_exit(acct, ps.symbol)
+            tag = " [DRY-RUN]" if status == "dry_run" else ""
+            logger.info(
+                f"[{acct}] {ps.symbol} {reason}  side={pos.side} "
+                f"entry={pos.entry_price:.5f} → {current_price:.5f} "
+                f"realized≈${realized:.2f}{tag}"
+            )
+            ps.positions[acct] = None
+            self._save_state()
+            return
+
+        # CRITICAL: exit failed. State preserved on purpose — IBKR likely still
+        # holds the position. Loud log + halt so subsequent bars don't try
+        # to manage a position we can't actually move.
+        err = result.get("error") or "unknown error"
+        logger.critical(
+            f"[{acct}] {ps.symbol} EXIT_REJECTED reason={reason} status={status} "
+            f"ibkr_error={err} — position likely STILL OPEN at IBKR. "
+            f"State preserved. Account halted. MANUAL INTERVENTION REQUIRED."
         )
-        ps.positions[acct] = None
+        ps.halted[acct] = True
         self._save_state()
 
     # ───────────────────────── FX day rollover ─────────────────────────

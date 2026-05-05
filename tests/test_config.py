@@ -16,9 +16,10 @@ from config import (
 
 class TestConstants:
     def test_lot_size(self):
-        # 0.10 lot = 10,000 units. Routes as odd-lot (below IDEALPRO 20k min)
-        # but accepted on the configured FA sub-accounts (verified via whatIf).
-        assert LOT_SIZE == 0.10
+        # 0.05 lot = 5,000 units. Routes as odd-lot (below IDEALPRO 20k min)
+        # and stays within USD cash buying power on both FA sub-accounts so
+        # no leveraged-FX permission is required.
+        assert LOT_SIZE == 0.05
 
     def test_min_account_balance(self):
         assert MIN_ACCOUNT_BALANCE_USD == 1000

@@ -12,9 +12,9 @@ from typing import List
 
 
 # ─── Hardcoded tunables (NOT strategy inputs) ─────────────────────────────
-LOT_SIZE: float = 0.10                  # 10k units; routes as odd-lot below IDEALPRO 20k min.
-                                         # Verified accepted on U25265693 & U25272450 via whatIf.
-                                         # Margin ≈ $352/position; 1 pip = $1.00.
+LOT_SIZE: float = 0.05                  # 5k units; routes as odd-lot below IDEALPRO 20k min.
+                                         # NOT yet whatIf-verified on U25265693 / U25272450 at this size.
+                                         # Margin ≈ $176/position; 1 pip ≈ $0.50.
 MIN_ACCOUNT_BALANCE_USD: float = 1000   # accounts below this are excluded
 TRAIL_ARM_PCT: float = 0.5              # arm trail at 0.5% of frozen balance
 EMA_PERIOD: int = 50                    # 50-period EMA on 5-min closes
