@@ -12,10 +12,9 @@ from typing import List
 
 
 # ─── Hardcoded tunables (NOT strategy inputs) ─────────────────────────────
-LOT_SIZE: float = 0.20                  # 20k units; at IDEALPRO threshold — surfaces in
-                                         # reqPositionsAsync, allows trail-arm to reach
-                                         # the 0.5%-of-balance threshold on $10k accounts.
-                                         # Margin ≈ $170/position; 1 pip ≈ $2.00.
+LOT_SIZE: float = 0.25                  # 25k units; above IDEALPRO threshold so positions
+                                         # surface cleanly in reqPositionsAsync.
+                                         # Margin ≈ $210/position; 1 pip ≈ $2.50.
 MIN_ACCOUNT_BALANCE_USD: float = 1000   # accounts below this are excluded
 TRAIL_ARM_PCT: float = 0.5              # arm trail at 0.5% of frozen balance
 EMA_PERIOD: int = 50                    # 50-period EMA on 5-min closes

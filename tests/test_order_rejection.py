@@ -118,7 +118,7 @@ class TestOpenPosition:
         assert pos.side == "LONG"
         assert pos.entry_price == pytest.approx(actual_fill)
         assert ps.halted[acct] is False
-        assert s.pnl.entries == [(acct, "EURUSD", "LONG", actual_fill, 20000)]
+        assert s.pnl.entries == [(acct, "EURUSD", "LONG", actual_fill, 25000)]
         assert s.ibkr.calls[0]["side"] == "BUY"
 
     def test_dry_run_records_state_with_bar_close_price(self):
