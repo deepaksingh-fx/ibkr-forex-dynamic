@@ -1,4 +1,4 @@
-# forex_cpr_ibkr — live launch (Windows / PowerShell)
+# forex_cpr_ibkr - live launch (Windows / PowerShell)
 #
 # Usage:
 #   1. Stop any currently-running bot (Ctrl+C in the other window)
@@ -11,32 +11,32 @@
 #   - Wipes stale account_balances.json (forces fresh balance fetch)
 #   - Wipes strategy_state.json (clean reconcile from broker)
 #   - Launches runner.py with: USD,JPY allowed; entry 0.05%; per-trade SL 0.33%;
-#     per-day cap 1%; LIVE TRADING ON (real orders); --force-clean-restart
+#     per-day cap 1%; LIVE TRADING ON; --force-clean-restart
 #   - Streams logs to terminal AND appends to bot.log
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-Write-Host ""
-Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host " forex_cpr_ibkr — LIVE LAUNCH" -ForegroundColor Cyan
-Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host " allowed     : USD,JPY"
-Write-Host " port        : 4001 (live gateway)"
-Write-Host " trigger     : 0.05%"
-Write-Host " per-trade SL: 0.33%"
-Write-Host " per-day cap : 1.0%"
-Write-Host " live        : YES (--i-really-mean-it set)"
-Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host ""
+Write-Host ''
+Write-Host '========================================================' -ForegroundColor Cyan
+Write-Host ' forex_cpr_ibkr - LIVE LAUNCH' -ForegroundColor Cyan
+Write-Host '========================================================' -ForegroundColor Cyan
+Write-Host ' allowed       : USD,JPY'
+Write-Host ' port          : 4001 (live gateway)'
+Write-Host ' trigger       : 0.05 percent'
+Write-Host ' per-trade SL  : 0.33 percent'
+Write-Host ' per-day cap   : 1.0 percent'
+Write-Host ' live trading  : YES'
+Write-Host '========================================================' -ForegroundColor Cyan
+Write-Host ''
 
-# Wipe stale state — these were mostly $0 balance + dry-run-recorded positions.
+# Wipe stale state - fresh balance fetch + clean reconcile.
 Remove-Item -Force account_balances.json -ErrorAction SilentlyContinue
 Remove-Item -Force strategy_state.json   -ErrorAction SilentlyContinue
-Write-Host "Cleared: account_balances.json, strategy_state.json"
-Write-Host ""
-
-# Look for `LIVE_TRADING=True` in the first few log lines below.
-# If it says LIVE_TRADING=False, KILL IT (Ctrl+C) — dry-run mode.
+Write-Host 'Cleared: account_balances.json, strategy_state.json'
+Write-Host ''
+Write-Host 'Look for LIVE_TRADING=True in the first few log lines.'
+Write-Host 'If you see LIVE_TRADING=False, kill it (Ctrl+C) - dry-run mode.'
+Write-Host ''
 
 python runner.py `
     --allowed USD,JPY `
