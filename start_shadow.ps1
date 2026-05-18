@@ -22,7 +22,7 @@ Write-Host ''
 Write-Host '========================================================' -ForegroundColor Green
 Write-Host ' forex_cpr_ibkr - SHADOW MODE (no real orders)' -ForegroundColor Green
 Write-Host '========================================================' -ForegroundColor Green
-Write-Host " account      : $Account  (informational only — no orders)"
+Write-Host " account      : $Account  (informational only - no orders)"
 Write-Host " lot size     : $LotSize lot ($units units, used in shadow log only)"
 Write-Host " port         : 4001"
 Write-Host " state file   : strategy_state.json"

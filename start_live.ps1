@@ -53,7 +53,7 @@ try {
 Write-Host ''
 
 # Explicit confirmation before live trading
-$confirm = Read-Host "LIVE MODE — this will place real CFD orders on $Account. Type 'YES' to proceed"
+$confirm = Read-Host "LIVE MODE - this will place real CFD orders on $Account. Type 'YES' to proceed"
 if ($confirm -ne 'YES') {
     Write-Host 'Aborted.' -ForegroundColor Yellow
     exit 1
@@ -73,7 +73,7 @@ if ($ForceCleanRestart) {
 
 Write-Host ''
 Write-Host 'Starting bot. Watch for LIVE_TRADING=True in the startup log.' -ForegroundColor Cyan
-Write-Host 'If LIVE_TRADING=False appears, kill with Ctrl+C — wrong mode.' -ForegroundColor Cyan
+Write-Host 'If LIVE_TRADING=False appears, kill with Ctrl+C - wrong mode.' -ForegroundColor Cyan
 Write-Host ''
 
 python @pythonArgs 2>&1 | Tee-Object -FilePath live.log -Append
