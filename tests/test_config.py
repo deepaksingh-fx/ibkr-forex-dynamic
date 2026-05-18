@@ -5,10 +5,8 @@ import pytest
 
 from config import (
     DEFAULT_SYMBOLS,
-    EMA_PERIOD,
     LOT_SIZE,
     MIN_ACCOUNT_BALANCE_USD,
-    TRAIL_ARM_PCT,
     IBKRConnection,
     StrategyConfig,
 )
@@ -17,86 +15,49 @@ from config import (
 class TestConstants:
     def test_lot_size(self):
         # 0.25 lot = 25,000 units. Above IDEALPRO threshold so positions
-        # surface cleanly in reqPositionsAsync; 1 pip ≈ $2.50.
+        # surface cleanly in reqPositionsAsync; reserved for future trading.
         assert LOT_SIZE == 0.25
 
     def test_min_account_balance(self):
         assert MIN_ACCOUNT_BALANCE_USD == 1000
 
-    def test_trail_arm_pct(self):
-        assert TRAIL_ARM_PCT == 0.5
-
-    def test_ema_period(self):
-        assert EMA_PERIOD == 50
-
     def test_default_symbols_count(self):
-        assert len(DEFAULT_SYMBOLS) == 15
+        assert len(DEFAULT_SYMBOLS) == 13
 
     def test_default_symbols_unique(self):
         assert len(set(DEFAULT_SYMBOLS)) == len(DEFAULT_SYMBOLS)
 
+    def test_default_symbols_includes_aud_nzd(self):
+        assert "AUDUSD" in DEFAULT_SYMBOLS
+        assert "AUDJPY" in DEFAULT_SYMBOLS
+        assert "NZDUSD" in DEFAULT_SYMBOLS
+        assert "NZDJPY" in DEFAULT_SYMBOLS
+
 
 class TestValidation:
     def test_minimum_valid_config(self):
-        cfg = StrategyConfig(allowed_currencies=("USD",))
-        assert cfg.allowed_currencies == ("USD",)
+        cfg = StrategyConfig()
+        assert cfg.symbols_list == tuple(DEFAULT_SYMBOLS)
 
     def test_empty_symbols_raises(self):
         with pytest.raises(ValueError, match="symbols"):
-            StrategyConfig(symbols_list=(), allowed_currencies=("USD",))
-
-    def test_empty_allowed_currencies_raises(self):
-        with pytest.raises(ValueError, match="allowed_currencies"):
-            StrategyConfig(allowed_currencies=())
-
-    def test_zero_entry_trigger_raises(self):
-        with pytest.raises(ValueError, match="entry_trigger"):
-            StrategyConfig(allowed_currencies=("USD",), entry_trigger_range_pct=0)
-
-    def test_negative_entry_trigger_raises(self):
-        with pytest.raises(ValueError, match="entry_trigger"):
-            StrategyConfig(allowed_currencies=("USD",), entry_trigger_range_pct=-0.05)
-
-    def test_zero_per_trade_loss_raises(self):
-        with pytest.raises(ValueError, match="per_trade_loss"):
-            StrategyConfig(allowed_currencies=("USD",), per_trade_loss_pct=0)
-
-    def test_zero_per_day_loss_raises(self):
-        with pytest.raises(ValueError, match="per_day_loss"):
-            StrategyConfig(allowed_currencies=("USD",), per_day_loss_pct=0)
-
-
-class TestNormalization:
-    def test_lowercase_currencies_normalized(self):
-        cfg = StrategyConfig(allowed_currencies=("usd", "jpy"))
-        assert cfg.allowed_currencies == ("USD", "JPY")
-
-    def test_mixed_case_normalized(self):
-        cfg = StrategyConfig(allowed_currencies=("UsD", "jPy", "EuR"))
-        assert cfg.allowed_currencies == ("USD", "JPY", "EUR")
-
-    def test_whitespace_stripped(self):
-        cfg = StrategyConfig(allowed_currencies=("  usd  ",))
-        assert cfg.allowed_currencies == ("USD",)
+            StrategyConfig(symbols_list=())
 
 
 class TestSafetyFlags:
     def test_dry_run_is_default(self):
-        cfg = StrategyConfig(allowed_currencies=("USD",))
+        cfg = StrategyConfig()
         assert cfg.LIVE_TRADING is False
 
     def test_live_with_read_only_raises(self):
-        # LIVE_TRADING=True + read_only=True is contradictory.
         with pytest.raises(ValueError, match="read_only"):
             StrategyConfig(
-                allowed_currencies=("USD",),
                 LIVE_TRADING=True,
                 ibkr=IBKRConnection(read_only=True),
             )
 
     def test_live_with_read_only_false_ok(self):
         cfg = StrategyConfig(
-            allowed_currencies=("USD",),
             LIVE_TRADING=True,
             ibkr=IBKRConnection(read_only=False),
         )

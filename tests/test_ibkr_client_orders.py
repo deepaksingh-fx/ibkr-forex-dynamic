@@ -41,7 +41,6 @@ class _FakeTrade:
 
 def _config(live: bool = True) -> StrategyConfig:
     return StrategyConfig(
-        allowed_currencies=("USD",),
         LIVE_TRADING=live,
         ibkr=IBKRConnection(read_only=not live),
     )

@@ -1,134 +1,118 @@
 """
-forex_cpr_ibkr — main strategy loop.
+forex_cpr_ibkr — integrated live/shadow strategy loop.
 
-Orchestrates everything:
-  1. Trading-zone gate (poll every 60s outside).
-  2. On entry to zone: load/init balances, filter ≥$1000, weekly CPR, selection.
-  3. Pre-warm 50-EMA per shortlisted pair (fetch ≥250 historical 5-min bars).
-  4. For Tue–Fri: also compute today's daily CPR from prior FX day.
-     For Mon: weekly CPR == daily CPR.
-  5. Subscribe to streaming 5-min bars per shortlisted pair.
-  6. On each new closed bar:
-        update EMA → exit checks (EOD/breaker/SL/trail/reversal) → entry trigger
-  7. On 17:00 NY rollover detected via bar timestamps:
-        - Tue→Fri close-of-day: recompute next day's daily CPR
-        - Sun rollover: recompute weekly CPR + re-run selection
-  8. On Fri 17:00 NY: cancel streams, drop into trading-zone gate.
+What it does (per session within the Sun 17:00 → Fri 17:00 NY zone):
+  1. Bootstrap accounts (balances + the CFD trading account check).
+  2. Run daily-narrowest selection (15-pair CPR-width comparison).
+  3. For the selected pair:
+       a. Fetch `warmup_days` of 5-min bars (chunked, dedup).
+       b. Build the per-FX-day HLC cache → CPR (TC/BC/Pivot) per day.
+       c. Instantiate `CPRSuperTrendStrategy` and replay every warmup bar
+          chronologically to warm the regime classifier + AdaptiveSuperTrend.
+       d. Subscribe to live streaming 5-min bars.
+  4. On each newly-closed live bar: update the fx_day_hlc cache, look up
+     today's CPR (from prior trading FX day's HLC), feed to the strategy,
+     log every event to the shadow CSV, and (only if LIVE_TRADING=True)
+     place a real CFD market order on `cfd_account`.
+  5. At each 17:00 NY rollover, re-run selection. If the narrowest pair
+     changed, tear down the current pair's stream + strategy and rebuild
+     for the new pair (force-exit at 16:55 has already flattened position).
+  6. At Fri 17:00 NY, tear down and drop into the weekend gate.
 
-NO orders unless LIVE_TRADING=True (config). Dry-run logs full intent.
+Shadow mode (LIVE_TRADING=False, default):
+  No real orders are placed. Every strategy decision is logged to
+  `backtest_output/shadow/shadow_events_<session>.csv` and rolled up into
+  trades in `shadow_trades_<session>.csv`.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, Optional
 
-from config import (
-    EMA_PERIOD,
-    EMA_PREWARM_BARS,
-    LOT_SIZE,
-    StrategyConfig,
-    TRADING_ZONE_POLL_SECONDS,
-    TRAIL_ARM_PCT,
-)
-from cpr import CPR, compute_cpr_from_bars
-from ibkr_client import IBKRClient
-from indicators import EMA
+from adaptive_supertrend import AdaptiveSTConfig
 from balance_store import BalanceStore
-from pnl_tracker import PnLTracker
-from selection import select_shortlist, SelectionError
-from state_store import (
-    PersistedPosition,
-    PersistedState,
-    StateStore,
-)
+from config import StrategyConfig, TRADING_ZONE_POLL_SECONDS
+from cpr import compute_cpr_from_bars, compute_cpr_from_hlc
+from cpr_st_strategy import CPRSuperTrendStrategy
+from ibkr_client import IBKRClient
+from regime import RegimeConfig
+from selection import SelectionError, narrowest_pair
+from shadow_log import ShadowLog
+from state_store import PersistedState, StateStore, StateStoreError
 from time_utils import (
-    NY,
     current_fx_day_anchor,
-    is_eod_candle_close,
     is_in_trading_zone,
     ny_now,
-    prior_fx_day_window,
-    prior_week_window,
+    prior_trading_fx_day_window,
     to_ny,
 )
 
 logger = logging.getLogger(__name__)
 
-LOT_UNITS = LOT_SIZE * 100_000   # 10,000 base ccy at 0.10 lot
-EOD_TIME = time(16, 55)
+
+class ConnectionLostError(RuntimeError):
+    """Raised when the IBKR socket drops mid-session."""
 
 
 class StateMismatchError(RuntimeError):
-    """Raised at startup when persisted state ≠ IBKR positions."""
+    """Raised when persisted state doesn't match IBKR positions and
+    force_clean_restart wasn't set. Bot refuses to start to prevent
+    orphaning or double-trading a position."""
 
 
-class ConnectionLostError(RuntimeError):
-    """Raised when the IBKR socket drops mid-session — caught by run() to
-    drive automatic reconnect + resume via the reconciler."""
-
-
-# Reconnect backoff (seconds): start at 5s, double on each failure, cap at 60s.
 RECONNECT_BACKOFF_INITIAL_S = 5.0
 RECONNECT_BACKOFF_MAX_S = 60.0
 
 
-# ─── Per-pair state (across all accounts) ─────────────────────────────────
-@dataclass
-class _Position:
-    side: str                     # "LONG" or "SHORT"
-    entry_price: float
-    entry_time: datetime
-    trail_armed: bool = False
+def _bar_ts_ny(bar) -> datetime:
+    ts = bar.date
+    if ts.tzinfo is None:
+        from datetime import timezone as _tz
+        ts = ts.replace(tzinfo=_tz.utc)
+    return to_ny(ts)
 
 
-@dataclass
-class _PairState:
-    symbol: str
-    accounts: List[str]
-    weekly_cpr: CPR
-    daily_cpr: CPR                                    # = weekly_cpr on Mon, prior FX day Tue–Fri
-    ema: EMA = field(default_factory=lambda: EMA(EMA_PERIOD))
-    # account -> Position | None
-    positions: Dict[str, Optional[_Position]] = field(default_factory=dict)
-    halted: Dict[str, bool] = field(default_factory=dict)
-    last_processed_open_ny: Optional[datetime] = None
-    last_fx_day_start: Optional[datetime] = None
-    bars_handle: object = None     # BarDataList we subscribed to
-
-
-# ─── Strategy ─────────────────────────────────────────────────────────────
 class Strategy:
+    """Integrated live/shadow strategy."""
+
     def __init__(
         self,
         config: StrategyConfig,
         ibkr: IBKRClient,
-        pnl: PnLTracker,
         balances: BalanceStore,
+        shadow_dir: Path = Path("backtest_output/shadow"),
         state_store: Optional[StateStore] = None,
         force_clean_restart: bool = False,
     ):
         self.config = config
         self.ibkr = ibkr
-        self.pnl = pnl
         self.balances = balances
+        self.shadow_dir = shadow_dir
         self.state_store = state_store
         self.force_clean_restart = force_clean_restart
-        self.active_accounts: Dict[str, float] = {}   # account -> frozen balance
-        self.pair_states: Dict[str, _PairState] = {}
-        self._stop = asyncio.Event()
-        self._bar_evt = asyncio.Event()    # set whenever any pair's bar list updates
 
-    # ───────────────────────── entry point ─────────────────────────
+        # Per-pair state — torn down and rebuilt on each pair change.
+        self.current_pair: Optional[str] = None
+        self.current_strategy: Optional[CPRSuperTrendStrategy] = None
+        self.current_bars_handle = None
+        self.current_force_exit_time: Optional[time] = None
+        # Per-FX-day HLC for the CURRENT pair only. Rebuilt on pair change.
+        self.fx_day_hlc: Dict[datetime, tuple[float, float, float]] = {}
+        # Last bar timestamp processed by the strategy (for streaming dedupe).
+        self.last_processed_open_ny: Optional[datetime] = None
+        # Track which FX day the strategy is in to detect rollover.
+        self.current_fx_day_start: Optional[datetime] = None
+
+        self.active_accounts: Dict[str, float] = {}
+        self.shadow_log: Optional[ShadowLog] = None
+        self._stop = asyncio.Event()
+        self._bar_evt = asyncio.Event()
+
+    # ─────────────────── entry point ───────────────────
     async def run(self) -> None:
-        """
-        Outer loop. Maintains the IBKR connection and re-runs the session
-        across reconnects. A short daily relogin to IB Gateway will drop the
-        socket; we detect it, sleep with backoff, reconnect, and let the
-        reconciler resume any in-flight state.
-        """
         backoff_s = RECONNECT_BACKOFF_INITIAL_S
         try:
             while not self._stop.is_set():
@@ -136,30 +120,26 @@ class Strategy:
                     if not self.ibkr.is_connected:
                         logger.info("Connecting to IBKR...")
                         await self.ibkr.connect()
-                        backoff_s = RECONNECT_BACKOFF_INITIAL_S   # reset on success
+                        backoff_s = RECONNECT_BACKOFF_INITIAL_S
 
-                    # Trading-zone gate.
                     while (not is_in_trading_zone(ny_now())
                             and not self._stop.is_set()):
                         if not self.ibkr.is_connected:
                             raise ConnectionLostError("disconnected while waiting for zone")
                         logger.info(
-                            "Outside trading zone (Sun 17:00 → Fri 17:00 NY); "
-                            f"sleeping {TRADING_ZONE_POLL_SECONDS}s..."
+                            f"Outside trading zone; sleeping {TRADING_ZONE_POLL_SECONDS}s..."
                         )
                         await self._interruptible_sleep(TRADING_ZONE_POLL_SECONDS)
                     if self._stop.is_set():
                         break
 
-                    # In zone — bootstrap and run a session.
                     await self._run_session()
                 except StateMismatchError:
-                    # Reconciler refused to start — propagate; user must intervene.
+                    # Don't loop on this — the user needs to intervene.
                     raise
                 except ConnectionLostError as e:
-                    logger.warning(
-                        f"Connection lost ({e}); reconnecting in {backoff_s:.0f}s"
-                    )
+                    logger.warning(f"Connection lost ({e}); reconnecting in {backoff_s:.0f}s")
+                    await self._teardown_pair()
                     await self._safe_disconnect()
                     await self._interruptible_sleep(backoff_s)
                     backoff_s = min(backoff_s * 2, RECONNECT_BACKOFF_MAX_S)
@@ -167,688 +147,563 @@ class Strategy:
                     logger.exception(
                         f"Unexpected session error; reconnecting in {backoff_s:.0f}s"
                     )
+                    await self._teardown_pair()
                     await self._safe_disconnect()
                     await self._interruptible_sleep(backoff_s)
                     backoff_s = min(backoff_s * 2, RECONNECT_BACKOFF_MAX_S)
         finally:
+            await self._teardown_pair()
             await self._safe_disconnect()
+            if self.shadow_log is not None:
+                self.shadow_log.close()
 
     def stop(self) -> None:
         self._stop.set()
+        self._bar_evt.set()
 
     async def _safe_disconnect(self) -> None:
-        """Best-effort disconnect; clears in-memory pair_states so the next
-        session re-bootstraps cleanly via the reconciler. State on disk is
-        untouched — open positions persist across reconnect."""
-        self.pair_states.clear()
         try:
             await self.ibkr.disconnect()
         except Exception:
             logger.exception("disconnect failed (continuing)")
 
     async def _interruptible_sleep(self, secs: float) -> None:
-        """Sleep up to `secs`, returning early if _stop is set."""
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=secs)
         except asyncio.TimeoutError:
             pass
 
-    # ───────────────────────── one session = one trading-week segment ─────────────────────────
+    # ─────────────────── session = inside-zone segment ───────────────────
     async def _run_session(self) -> None:
-        """
-        Run from 'now' (inside zone) until we exit the zone (Fri 17:00 NY)
-        OR the IBKR socket drops. On socket drop, raises ConnectionLostError
-        — caller catches and reconnects.
-        """
-        try:
-            await self._bootstrap_accounts()
-            # Reconcile against IBKR before any subscription — fail loud on mismatch.
-            await self._reconcile_with_ibkr()
-            await self._bootstrap_selection_and_subscribe()
-            self._restore_positions_from_persisted()
-            # Save fresh state after bootstrap completes.
-            self._save_state()
+        await self._bootstrap_accounts()
+        await self._verify_cfd_account_present()
 
-            # Active loop: wait for bar updates and react. Periodically wake
-            # to check the zone gate AND connection health.
-            while is_in_trading_zone(ny_now()) and not self._stop.is_set():
-                if not self.ibkr.is_connected:
-                    raise ConnectionLostError("ib socket dropped during session")
-                try:
-                    await asyncio.wait_for(self._bar_evt.wait(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    pass
-                self._bar_evt.clear()
+        if self.shadow_log is None:
+            self.shadow_log = ShadowLog(self.shadow_dir, ny_now())
 
-            # Exited the zone (or stop) — clean teardown WITH force-exit.
-            await self._teardown_streams(force_exit_positions=True)
-        except ConnectionLostError:
-            # Socket is dead — placing exit orders would just fail. State on
-            # disk is intact; the reconciler will resume positions on reconnect.
-            await self._teardown_streams(force_exit_positions=False)
-            raise
+        # Initial selection + strategy install.
+        await self._select_and_install_strategy()
 
-    # ───────────────────────── account bootstrap ─────────────────────────
+        # Main loop: wait for bar events. Periodically check for FX-day
+        # rollover (which may require pair reselection).
+        last_seen_fx_day = self.current_fx_day_start
+        while is_in_trading_zone(ny_now()) and not self._stop.is_set():
+            if not self.ibkr.is_connected:
+                raise ConnectionLostError("ib socket dropped during session")
+            try:
+                await asyncio.wait_for(self._bar_evt.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                pass
+            self._bar_evt.clear()
+            # FX-day rollover detection.
+            cur_fx_day, _ = current_fx_day_anchor(ny_now())
+            if last_seen_fx_day is not None and cur_fx_day != last_seen_fx_day:
+                logger.info(f"FX-day rollover detected → {cur_fx_day.isoformat()}")
+                last_seen_fx_day = cur_fx_day
+                await self._select_and_install_strategy()
+            else:
+                last_seen_fx_day = cur_fx_day
+
+        await self._teardown_pair()
+        logger.info("Exited trading zone — dropping back to gate")
+
+    # ─────────────────── bootstrap ───────────────────
     async def _bootstrap_accounts(self) -> None:
         if self.balances.has_file():
             self.balances.load()
             logger.info(f"Loaded frozen balances from {self.balances.path}")
         else:
-            logger.info("No balance file found — fetching from IBKR (one-time snapshot)")
+            logger.info("No balance file — fetching from IBKR (one-time snapshot)")
             fresh = await self.ibkr.fetch_account_balances_usd()
             self.balances.init_from(fresh)
             logger.info(f"Wrote frozen balances → {self.balances.path}: {fresh}")
-
         active = self.balances.active_accounts()
         if not active:
-            raise RuntimeError(
-                "No active accounts (none have balance ≥ $1000). "
-                "Check account_balances.json or fund an account."
-            )
+            logger.warning("No active sub-accounts (none ≥ $1000)")
+        else:
+            logger.info(f"Active accounts ({len(active)}): "
+                        + ", ".join(f"{a}=${b:,.2f}" for a, b in active.items()))
         self.active_accounts = active
-        logger.info(
-            f"Active accounts ({len(active)}): "
-            + ", ".join(f"{a}=${b:,.2f}" for a, b in active.items())
-        )
 
-    # ───────────────────────── persistence helpers ─────────────────────────
-    def _build_persisted_state(self) -> PersistedState:
-        cur_fx_start, _ = current_fx_day_anchor(ny_now())
-        positions: Dict[str, Dict[str, PersistedPosition]] = {}
-        day_realized: Dict[str, float] = {}
-        halted: Dict[str, bool] = {}
-        for sym, ps in self.pair_states.items():
-            positions[sym] = {}
-            for acct, pos in ps.positions.items():
-                if pos is None:
-                    continue
-                positions[sym][acct] = PersistedPosition(
-                    side=pos.side,
-                    entry_price=pos.entry_price,
-                    entry_time=pos.entry_time.isoformat(),
-                    trail_armed=pos.trail_armed,
+    async def _verify_cfd_account_present(self) -> None:
+        managed = self.ibkr.managed_accounts()
+        if self.config.cfd_account not in managed:
+            logger.warning(
+                f"cfd_account={self.config.cfd_account} NOT in managed accounts "
+                f"{managed} — shadow logging will still work, but if you flip "
+                f"LIVE_TRADING=True orders will fail."
+            )
+        else:
+            logger.info(f"CFD trading account: {self.config.cfd_account}  "
+                        f"(LIVE_TRADING={self.config.LIVE_TRADING})")
+
+    # ─────────────────── selection + install strategy ───────────────────
+    async def _select_and_install_strategy(self) -> None:
+        """Pick the daily-narrowest pair and (re)build the strategy if it changed."""
+        sel = await self._compute_daily_selection()
+        if sel is None:
+            return
+        winner, cpr = sel
+        if winner == self.current_pair:
+            logger.info(f"Selected pair unchanged: {winner}  (no rebuild needed)")
+            return
+
+        # Pair changed — tear down old + build new.
+        if self.current_pair is not None:
+            logger.info(f"Pair change {self.current_pair} → {winner}; tearing down")
+            await self._teardown_pair()
+
+        await self._install_strategy_for_pair(winner)
+
+    async def _compute_daily_selection(self):
+        now = ny_now()
+        ws, we = prior_trading_fx_day_window(now)
+        logger.info(f"Computing daily CPR for {len(self.config.symbols_list)} symbols, "
+                    f"prior trading FX day {ws.isoformat()} → {we.isoformat()}")
+        cprs = {}
+        for sym in self.config.symbols_list:
+            try:
+                bars = await self.ibkr.fetch_5min_bars(sym, end_ny=we, duration_str="2 D")
+            except Exception:
+                logger.exception(f"{sym}: fetch failed; skipping")
+                continue
+            in_window = self._filter_window(bars, ws, we)
+            if not in_window:
+                logger.warning(f"{sym}: no bars in prior-FX-day window — skipping")
+                continue
+            try:
+                cprs[sym] = compute_cpr_from_bars(
+                    [b.high for b in in_window],
+                    [b.low for b in in_window],
+                    [b.close for b in in_window],
                 )
-            for acct, h in ps.halted.items():
-                # take the OR across pairs (per-account flag)
-                halted[acct] = halted.get(acct, False) or h
-        for acct in self.active_accounts:
-            day_realized[acct] = self.pnl.day_pnl(acct)
-        return PersistedState(
-            fx_day_start=cur_fx_start.isoformat(),
-            shortlist=list(self.pair_states.keys()),
-            positions=positions,
-            day_realized=day_realized,
-            halted=halted,
-        )
-
-    def _save_state(self) -> None:
-        """Best-effort persist; never crashes the strategy on persistence failure."""
-        if self.state_store is None:
-            return
+            except Exception:
+                logger.exception(f"{sym}: CPR compute failed; skipping")
+        if not cprs:
+            logger.error("No symbols produced a CPR — skipping selection")
+            return None
+        candidates = [s for s in self.config.symbols_list if s in cprs]
         try:
-            self.state_store.save(self._build_persisted_state())
-        except Exception:
-            logger.exception("State persist failed (continuing — strategy is unaffected)")
+            winner = narrowest_pair(candidates, cprs)
+        except SelectionError as e:
+            logger.error(f"Selection failed: {e}")
+            return None
+        wcpr = cprs[winner]
+        logger.info(
+            f"SELECTED {winner}  width_pct={wcpr.width_pct:.4f}%  "
+            f"TC={wcpr.tc:.5f}  BC={wcpr.bc:.5f}"
+        )
+        return winner, wcpr
 
-    async def _reconcile_with_ibkr(self) -> None:
+    # ─────────────────── state persistence + reconciliation ───────────────────
+    async def _reconcile_and_restore(self) -> None:
         """
-        On startup, compare any persisted state against IBKR's actual positions.
-        - No state file + IBKR clean       → fresh start, OK
-        - No state file + IBKR has positions for active accounts → halt unless force_clean_restart
-        - State file + matching IBKR       → resume (restore positions on first bar after subscribe)
-        - State file + mismatching IBKR    → halt unless force_clean_restart
+        After install: compare persisted state + IBKR positions and either
+        restore the strategy's position or halt on mismatch.
+
+        Decision matrix:
+          (A) no state file + IBKR flat                → fresh start, OK
+          (B) no state file + IBKR has position        → halt (unaccounted)
+          (C) state file pos=0 + IBKR flat             → OK
+          (D) state file pos=N + IBKR has matching N   → restore strategy.position
+          (E) state file pos=N + IBKR mismatch         → halt
         """
-        if self.state_store is None:
+        if self.state_store is None or self.current_strategy is None:
             return
 
-        # Force-clean: nuke state file and skip reconciliation.
         if self.force_clean_restart:
             if self.state_store.exists():
-                logger.warning(f"--force-clean-restart: deleting state file {self.state_store.path}")
+                logger.warning(
+                    f"--force-clean-restart: deleting state file {self.state_store.path}"
+                )
                 self.state_store.delete()
             return
 
-        ibkr_positions = []
+        # Fetch IBKR positions for our CFD account.
         try:
-            ibkr_positions = await self.ibkr.get_open_positions()
+            all_positions = await self.ibkr.ib.reqPositionsAsync()
         except Exception:
-            logger.exception("Failed to fetch IBKR positions for reconciliation")
-
-        # Filter to forex positions in our active accounts.
-        relevant: Dict[tuple, dict] = {}   # (pair, account) -> {"qty": signed_qty, "avg_cost": ...}
-        for ib_pos in ibkr_positions:
+            logger.exception("Failed to fetch IBKR positions during reconciliation")
+            all_positions = []
+        cfd_positions = []
+        for p in all_positions:
             try:
-                if ib_pos.contract.secType != "CASH":
+                if p.contract.secType != "CFD":
                     continue
-                if ib_pos.account not in self.active_accounts:
+                if p.account != self.config.cfd_account:
                     continue
-                if abs(ib_pos.position) < 1e-9:
-                    continue   # closed
-                pair = ib_pos.contract.symbol + ib_pos.contract.currency
-                relevant[(pair, ib_pos.account)] = {
-                    "qty": float(ib_pos.position),
-                    "avg_cost": float(getattr(ib_pos, "avgCost", 0.0)),
-                }
+                if abs(p.position) < 1e-9:
+                    continue
+                cfd_positions.append(p)
             except Exception:
-                logger.exception("Skipping malformed IBKR position entry")
+                logger.exception("Skipping malformed IBKR position row")
 
-        # Load persisted state if any.
+        # Any CFD position on a pair OTHER than the current selection is a
+        # stranded open trade — halt for safety.
+        for p in cfd_positions:
+            pair = (p.contract.symbol or "") + (p.contract.currency or "")
+            if pair != self.current_pair:
+                raise StateMismatchError(
+                    f"Stranded IBKR CFD position on {pair} (qty={p.position:+g}) "
+                    f"in {self.config.cfd_account}, but today's selection is "
+                    f"{self.current_pair}. Close manually in TWS, then re-run "
+                    f"with --force-clean-restart."
+                )
+
+        # Determine IBKR's position on the current pair.
+        cur_pair_pos = next(
+            (p for p in cfd_positions
+             if (p.contract.symbol + p.contract.currency) == self.current_pair),
+            None,
+        )
+        ibkr_qty = float(cur_pair_pos.position) if cur_pair_pos else 0.0
+        ibkr_position = 1 if ibkr_qty > 0 else -1 if ibkr_qty < 0 else 0
+
+        # Load persisted state.
         persisted: Optional[PersistedState] = None
         if self.state_store.exists():
             try:
                 persisted = self.state_store.load()
-            except Exception:
-                logger.exception("State file unreadable — refusing to start. "
-                                 "Use --force-clean-restart to overwrite.")
-                raise StateMismatchError("State file unreadable")
-
-        # Build set of expected (pair, account) → side from state.
-        expected: Dict[tuple, str] = {}
-        if persisted:
-            for pair, by_acct in persisted.positions.items():
-                for acct, pos in by_acct.items():
-                    expected[(pair, acct)] = pos.side
-
-        # Sub-threshold FX positions (<20k base ccy) don't appear in
-        # reqPositionsAsync — they settle into the multi-currency cash ledger.
-        # For any expected (pair, account) missing from `relevant`, probe the
-        # cash ledger; if the non-USD leg has a sign-consistent balance, treat
-        # it as a match.
-        ledger_cache: Dict[str, Dict[str, float]] = {}
-        for key, side in expected.items():
-            if key in relevant:
-                continue
-            pair, acct = key
-            if acct not in ledger_cache:
-                try:
-                    ledger_cache[acct] = await self.ibkr.fetch_cash_ledger(acct)
-                except Exception:
-                    logger.exception(f"fetch_cash_ledger({acct}) failed during reconciliation")
-                    ledger_cache[acct] = {}
-            ledger = ledger_cache[acct]
-            base, quote = pair[:3], pair[3:]
-            for ccy in (base, quote):
-                if ccy == "USD":
-                    continue   # account base — indistinguishable from natural cash
-                bal = ledger.get(ccy, 0.0)
-                if abs(bal) < 1.0:
-                    continue
-                # Sign convention:
-                #   +base ccy balance  → LONG (we bought base, so we're holding base)
-                #   -base ccy balance  → SHORT
-                #   +quote ccy balance → SHORT (we sold base to get quote)
-                #   -quote ccy balance → LONG
-                if ccy == base:
-                    implied_side = "LONG" if bal > 0 else "SHORT"
-                    qty = bal
-                else:
-                    implied_side = "SHORT" if bal > 0 else "LONG"
-                    qty = -bal
-                if implied_side == side:
-                    relevant[key] = {"qty": qty, "avg_cost": 0.0, "via_ledger": True}
-                    logger.info(
-                        f"Reconciliation: {pair} {acct} {side} matched via cash "
-                        f"ledger ({ccy}={bal:+.2f}) — sub-threshold IDEALPRO position"
-                    )
-                    break
-
-        issues: List[str] = []
-
-        # State expects but IBKR doesn't have:
-        for key, side in expected.items():
-            if key not in relevant:
-                issues.append(
-                    f"State expects {key[0]} {side} for {key[1]} but IBKR has no "
-                    f"matching position (reqPositions empty AND cash ledger has "
-                    f"no sign-consistent {key[0][:3]}/{key[0][3:]} balance)"
+            except StateStoreError as e:
+                raise StateMismatchError(
+                    f"State file unreadable: {e}. Fix or delete it and re-run "
+                    f"with --force-clean-restart."
                 )
 
-        # IBKR has but state doesn't expect:
-        for key, info in relevant.items():
-            if key not in expected:
-                issues.append(f"IBKR has {key[0]} qty={info['qty']:+g} for {key[1]} "
-                              f"but state has no record")
-                continue
-            # Both have it — check direction/qty.
-            ib_side = "LONG" if info["qty"] > 0 else "SHORT"
-            if ib_side != expected[key]:
-                issues.append(f"{key[0]} {key[1]}: state={expected[key]} but IBKR={ib_side}")
+        persisted_pos = persisted.position if persisted else 0
 
-        if issues:
-            for i in issues:
-                logger.error(f"RECONCILIATION ISSUE: {i}")
+        # Reconcile.
+        if persisted_pos != ibkr_position:
             raise StateMismatchError(
-                f"{len(issues)} reconciliation issue(s) detected. "
-                f"Resolve manually (close stray positions in TWS or fix state file), "
-                f"then re-run. To wipe state and start fresh, use --force-clean-restart."
+                f"State/IBKR mismatch: state file says position={persisted_pos} "
+                f"on {persisted.selected_pair if persisted else '(none)'} but "
+                f"IBKR has position={ibkr_position} (qty={ibkr_qty:+g}) on "
+                f"{self.current_pair}. Resolve manually, then re-run with "
+                f"--force-clean-restart."
             )
 
-        if persisted and not relevant:
-            logger.info("Reconciliation OK: no state positions, no IBKR positions.")
-        elif persisted:
-            logger.info(f"Reconciliation OK: {len(relevant)} matched position(s) "
-                        f"between state file and IBKR — strategy will resume.")
-        else:
-            logger.info("Reconciliation OK: no state file (first run), no IBKR positions.")
-        # Stash for later restoration after subscriptions are wired up.
-        self._persisted_to_restore = persisted
-
-    def _restore_positions_from_persisted(self) -> None:
-        """After pair_states are built, restore positions/trail flags from persisted."""
-        persisted: Optional[PersistedState] = getattr(self, "_persisted_to_restore", None)
-        if persisted is None:
+        if ibkr_position == 0:
+            logger.info("Reconciliation OK: both state and IBKR are flat.")
             return
-        for sym, by_acct in persisted.positions.items():
-            ps = self.pair_states.get(sym)
-            if ps is None:
-                continue   # pair no longer in shortlist
-            for acct, pos in by_acct.items():
-                if acct not in ps.positions:
-                    continue
-                try:
-                    et = datetime.fromisoformat(pos.entry_time)
-                except Exception:
-                    et = ny_now()
-                ps.positions[acct] = _Position(
-                    side=pos.side,
-                    entry_price=pos.entry_price,
-                    entry_time=et,
-                    trail_armed=pos.trail_armed,
+
+        # Restore strategy state from persisted.
+        s = self.current_strategy
+        s.position = ibkr_position
+        s.entry_price = persisted.entry_price if persisted else None
+        if persisted and persisted.entry_timestamp:
+            try:
+                s.entry_timestamp = datetime.fromisoformat(persisted.entry_timestamp)
+            except ValueError:
+                logger.warning(
+                    f"Could not parse persisted entry_timestamp "
+                    f"{persisted.entry_timestamp!r}; leaving None"
                 )
-                # Re-prime PnL tracker so per-trade SL math has the entry.
-                self.pnl.on_entry(
-                    account=acct, symbol=sym, side=pos.side,
-                    entry_price=pos.entry_price, lot_units=LOT_UNITS,
-                )
-                logger.info(f"[RESTORE] {acct} {sym} {pos.side} @{pos.entry_price:.5f} "
-                            f"(trail_armed={pos.trail_armed})")
-        # Restore halted flags + day_realized
-        for acct, h in persisted.halted.items():
-            for ps in self.pair_states.values():
-                if acct in ps.halted:
-                    ps.halted[acct] = h
-        # Day-realized PnL is replayed by re-priming PnLTracker exits — but in the
-        # SimulatedPnLTracker we don't have a direct "set realized" hook. The day
-        # number will be approximate after restart; if you need exact, restart at
-        # 17:00 NY rollover when day_pnl resets anyway.
+        # Set prev_active_dir to match position direction so the NEXT opposite
+        # AST flip triggers an exit (otherwise a flip that happened during
+        # downtime would be silently missed).
+        s._prev_active_dir = ibkr_position
+        logger.info(
+            f"[RESTORE] {self.current_pair} position={ibkr_position} "
+            f"entry={s.entry_price} restored from state file + IBKR"
+        )
 
-    # ───────────────────────── selection + subscribe ─────────────────────────
-    async def _bootstrap_selection_and_subscribe(self) -> None:
-        now = ny_now()
-        ws, we = prior_week_window(now)
-        logger.info(f"Computing weekly CPR for {len(self.config.symbols_list)} symbols, "
-                    f"window {ws.isoformat()} → {we.isoformat()}")
-
-        # Fetch + compute weekly CPR for every symbol in the input list.
-        weekly_cprs: Dict[str, CPR] = {}
-        for sym in self.config.symbols_list:
-            bars = await self.ibkr.fetch_5min_bars(sym, end_ny=we, duration_str="1 W")
-            in_window = self._filter_window(bars, ws, we)
-            if not in_window:
-                logger.warning(f"{sym}: no bars in weekly window — skipping")
-                continue
-            cpr = compute_cpr_from_bars(
-                [b.high for b in in_window],
-                [b.low for b in in_window],
-                [b.close for b in in_window],
-            )
-            weekly_cprs[sym] = cpr
-
-        # Run selection.
+    def _save_state(self) -> None:
+        """Best-effort save after each event; never crashes the strategy."""
+        if self.state_store is None or self.current_strategy is None:
+            return
+        s = self.current_strategy
+        state = PersistedState(
+            cfd_account=self.config.cfd_account,
+            selected_pair=self.current_pair,
+            position=s.position,
+            entry_price=s.entry_price,
+            entry_timestamp=(
+                s.entry_timestamp.isoformat() if s.entry_timestamp else None
+            ),
+            last_processed_open_ny=(
+                self.last_processed_open_ny.isoformat()
+                if self.last_processed_open_ny else None
+            ),
+        )
         try:
-            sel = select_shortlist(
-                list(self.config.symbols_list),
-                list(self.config.allowed_currencies),
-                weekly_cprs,
-            )
-        except SelectionError as e:
-            raise RuntimeError(f"Asset selection failed: {e}") from e
+            self.state_store.save(state)
+        except Exception:
+            logger.exception("State save failed (continuing — strategy unaffected)")
 
-        logger.info(f"Selection: primary={sel.primary} expanded={sel.expanded} "
-                    f"shortlist={list(sel.shortlist)}")
+    async def _install_strategy_for_pair(self, symbol: str) -> None:
+        """Pre-fetch warmup, build strategy, replay, start streaming."""
+        logger.info(f"[install] Determining force-exit close time for {symbol}...")
+        close_t = await self.ibkr.determine_effective_close_time(symbol, sample_days=10)
+        if close_t is None:
+            close_t = time(16, 55)
+        logger.info(f"[install] force-exit close time: {close_t.strftime('%H:%M')} NY")
 
-        # Pre-warm + (Tue–Fri) compute daily CPR + subscribe.
-        cur_fx_start, _ = current_fx_day_anchor(now)
-        is_monday_fx_day = cur_fx_start.weekday() == 6      # Mon FX day starts on Sunday → weekday 6
+        now = ny_now()
+        warmup_start = now - timedelta(days=self.config.warmup_days)
+        logger.info(f"[install] Fetching {self.config.warmup_days}D warmup bars for {symbol}...")
+        bars = await self.ibkr.fetch_5min_bars_range(symbol, start_ny=warmup_start, end_ny=now)
+        logger.info(f"[install] Got {len(bars)} bars; computing per-FX-day HLC cache")
 
-        for sym in sel.shortlist:
-            weekly = weekly_cprs[sym]
-            if is_monday_fx_day:
-                daily = weekly
+        # Build FX-day HLC cache.
+        self.fx_day_hlc.clear()
+        for b in bars:
+            ts_ny = _bar_ts_ny(b)
+            fxs, _ = current_fx_day_anchor(ts_ny)
+            cur = self.fx_day_hlc.get(fxs)
+            if cur is None:
+                self.fx_day_hlc[fxs] = (float(b.high), float(b.low), float(b.close))
             else:
-                pds, pde = prior_fx_day_window(now)
-                pday_bars = await self.ibkr.fetch_5min_bars(sym, end_ny=pde, duration_str="2 D")
-                pday_in_window = self._filter_window(pday_bars, pds, pde)
-                if not pday_in_window:
-                    logger.warning(f"{sym}: no prior-FX-day bars; falling back to weekly CPR")
-                    daily = weekly
-                else:
-                    daily = compute_cpr_from_bars(
-                        [b.high for b in pday_in_window],
-                        [b.low for b in pday_in_window],
-                        [b.close for b in pday_in_window],
-                    )
+                H, L, _ = cur
+                self.fx_day_hlc[fxs] = (max(H, float(b.high)),
+                                        min(L, float(b.low)),
+                                        float(b.close))
+        logger.info(f"[install] HLC cache covers {len(self.fx_day_hlc)} FX days")
 
-            # Pre-warm EMA with last EMA_PREWARM_BARS bars before now.
-            warm_bars = await self.ibkr.fetch_5min_bars(
-                sym, end_ny=now, duration_str="3 D"
+        # Build the strategy with default Regime + AST configs.
+        strategy = CPRSuperTrendStrategy(
+            regime_cfg=RegimeConfig(),
+            ast_cfg=AdaptiveSTConfig(),
+            force_exit_close_time=close_t,
+            ast_bars_per_day=288,
+        )
+
+        # Replay bars chronologically, calling strategy.update on each.
+        # Use per-bar CPR from the FX day's prior trading day's HLC.
+        bars_sorted = sorted(bars, key=lambda b: _bar_ts_ny(b))
+        replayed = 0
+        for b in bars_sorted:
+            ts_ny = _bar_ts_ny(b)
+            cpr = self._cpr_for_ts(ts_ny)
+            if cpr is None:
+                continue   # no prior CPR available; skip warmup bars before first usable day
+            fxs, _ = current_fx_day_anchor(ts_ny)
+            outcome = strategy.update(
+                timestamp=ts_ny,
+                open_=float(b.open),
+                high=float(b.high),
+                low=float(b.low),
+                close=float(b.close),
+                daily_tc=cpr.tc,
+                daily_bc=cpr.bc,
+                daily_pp=cpr.pivot,
+                fx_day_start=fxs,
             )
-            warm_closes = [b.close for b in warm_bars[-EMA_PREWARM_BARS:]]
-            ps = _PairState(
-                symbol=sym,
-                accounts=list(self.active_accounts.keys()),
-                weekly_cpr=weekly,
-                daily_cpr=daily,
-            )
-            ps.ema.warmup(warm_closes)
-            for acct in self.active_accounts.keys():
-                ps.positions[acct] = None
-                ps.halted[acct] = False
-            ps.last_fx_day_start = cur_fx_start
-            self.pair_states[sym] = ps
-            ema_str = f"{ps.ema.value:.5f}" if ps.ema.value is not None else "None"
-            logger.info(
-                f"{sym}: weekly_TC={weekly.tc:.5f} weekly_BC={weekly.bc:.5f} "
-                f"daily_TC={daily.tc:.5f} daily_BC={daily.bc:.5f} "
-                f"EMA={ema_str} (prewarm={len(warm_closes)} bars)"
-            )
+            replayed += 1
+            # During warmup we DO NOT log events — these are historical
+            # decisions that have already passed.
+            self.last_processed_open_ny = ts_ny
+            self.current_fx_day_start = fxs
 
-        # Subscribe to streaming 5-min bars per shortlisted pair.
-        for sym in sel.shortlist:
-            ps = self.pair_states[sym]
-            ps.bars_handle = await self.ibkr.stream_5min_bars(
-                sym, on_update=self._make_bar_handler(sym)
-            )
-            logger.info(f"{sym}: subscribed to streaming 5-min bars")
+        logger.info(f"[install] Replayed {replayed} warmup bars; strategy is warm")
 
-    # ───────────────────────── teardown ─────────────────────────
-    async def _teardown_streams(self, force_exit_positions: bool = True) -> None:
-        """
-        Cancel streaming bars; optionally force-exit open positions.
+        # Install the live state.
+        self.current_pair = symbol
+        self.current_strategy = strategy
+        self.current_force_exit_time = close_t
 
-        force_exit_positions=True (zone-exit at Fri 17:00 NY):
-            close every open position via _exit_position.
-        force_exit_positions=False (socket disconnect):
-            leave positions untouched — orders can't fly anyway, and the
-            reconciler resumes state on reconnect.
-        """
-        for sym, ps in self.pair_states.items():
-            if ps.bars_handle is not None:
-                try:
-                    self.ibkr.cancel_stream(ps.bars_handle)
-                except Exception:
-                    logger.exception(f"cancel_stream({sym}) failed; continuing")
-                ps.bars_handle = None
-        if force_exit_positions:
-            for sym, ps in self.pair_states.items():
-                for acct, pos in ps.positions.items():
-                    if pos is not None:
-                        try:
-                            await self._exit_position(
-                                ps, acct, reason="ZONE_EXIT",
-                                current_price=pos.entry_price,
-                            )
-                        except Exception:
-                            logger.exception(f"force-exit failed {acct} {sym}")
-        self.pair_states.clear()
+        # Reconcile against IBKR + persisted state BEFORE we start streaming.
+        # If there's a mismatch, raise StateMismatchError — the user must
+        # intervene before the bot can run.
+        await self._reconcile_and_restore()
 
-    # ───────────────────────── bar handler factory ─────────────────────────
-    def _make_bar_handler(self, sym: str):
+        # Save a snapshot of the post-reconciliation state.
+        self._save_state()
+
+        # Subscribe to streaming bars.
+        bars_handle = await self.ibkr.stream_5min_bars(
+            symbol, on_update=self._make_bar_handler(symbol),
+        )
+        self.current_bars_handle = bars_handle
+        logger.info(f"[install] Streaming live 5-min bars for {symbol}")
+
+    async def _teardown_pair(self) -> None:
+        if self.current_bars_handle is not None:
+            try:
+                self.ibkr.cancel_stream(self.current_bars_handle)
+            except Exception:
+                logger.exception("cancel_stream raised")
+            self.current_bars_handle = None
+        self.current_pair = None
+        self.current_strategy = None
+        self.current_force_exit_time = None
+        self.fx_day_hlc.clear()
+        self.last_processed_open_ny = None
+        self.current_fx_day_start = None
+
+    # ─────────────────── per-bar processing ───────────────────
+    def _cpr_for_ts(self, ts_ny: datetime):
+        """Return CPR for the FX day containing ts_ny, or None if its prior
+        trading FX day's HLC is not yet in our cache."""
+        fxs, _ = current_fx_day_anchor(ts_ny)
+        sample = fxs + timedelta(hours=1)
+        prior_start, _ = prior_trading_fx_day_window(sample)
+        hlc = self.fx_day_hlc.get(prior_start)
+        if hlc is None:
+            return None
+        H, L, C = hlc
+        try:
+            return compute_cpr_from_hlc(H, L, C)
+        except Exception:
+            return None
+
+    def _make_bar_handler(self, symbol: str):
         def handler(bars, hasNewBar):
-            # Wake the main loop so it can react.
+            # Wake the main loop.
             self._bar_evt.set()
             if not hasNewBar or len(bars) < 2:
                 return
-            # The just-closed bar is the second-to-last (the last is still updating).
+            # The just-closed bar is bars[-2] (the last is still updating).
             closed = bars[-2]
-            # Coerce timestamp to NY tz-aware
-            ts = closed.date
-            if ts.tzinfo is None:
-                from datetime import timezone as _tz
-                ts = ts.replace(tzinfo=_tz.utc)
-            ts_ny = to_ny(ts)
-            asyncio.create_task(self._on_closed_bar(sym, ts_ny, closed))
+            asyncio.create_task(self._on_closed_bar(symbol, closed))
         return handler
 
-    # ───────────────────────── per-bar logic ─────────────────────────
-    async def _on_closed_bar(self, sym: str, open_ny: datetime, bar) -> None:
-        ps = self.pair_states.get(sym)
-        if ps is None:
+    async def _on_closed_bar(self, symbol: str, bar) -> None:
+        """Top-level try/except so a crash here doesn't silently kill the
+        asyncio task and leave the bot running deaf to bar updates."""
+        try:
+            await self._on_closed_bar_impl(symbol, bar)
+        except Exception:
+            logger.exception(
+                f"[{symbol}] _on_closed_bar raised on bar {getattr(bar, 'date', '?')}"
+            )
+
+    async def _on_closed_bar_impl(self, symbol: str, bar) -> None:
+        # Only handle bars from the currently-installed pair.
+        if symbol != self.current_pair or self.current_strategy is None:
             return
-        if ps.last_processed_open_ny == open_ny:
-            return                              # de-dupe
-        ps.last_processed_open_ny = open_ny
-        close = float(bar.close)
-        bar_close_ny = open_ny + timedelta(minutes=5)
+        ts_ny = _bar_ts_ny(bar)
+        if (self.last_processed_open_ny is not None
+                and ts_ny <= self.last_processed_open_ny):
+            return   # dedupe — already processed during warmup or earlier event
 
-        # Update EMA on every closed bar.
-        ema_val = ps.ema.update(close)
-
-        # Detect FX-day rollover.
-        bar_fx_start, _ = current_fx_day_anchor(open_ny)
-        if ps.last_fx_day_start is None:
-            ps.last_fx_day_start = bar_fx_start
-        elif bar_fx_start != ps.last_fx_day_start:
-            # Rolled over.
-            await self._on_fx_day_rollover(ps, bar_fx_start)
-            ps.last_fx_day_start = bar_fx_start
-
-        # Update PnL with new price.
-        self.pnl.update_price(sym, close)
-
-        # Per-account: arm trail, run exit precedence, then entry trigger.
-        for acct in ps.accounts:
-            await self._eval_account_on_bar(ps, acct, bar_close_ny, close, ema_val)
-
-    async def _eval_account_on_bar(
-        self, ps: _PairState, acct: str, bar_close_ny: datetime,
-        close: float, ema_val: Optional[float]
-    ) -> None:
-        if ps.halted[acct] and ps.positions[acct] is None:
-            return
-
-        balance = self.active_accounts[acct]
-        arm_threshold = balance * TRAIL_ARM_PCT / 100.0
-        trade_loss_cap = balance * self.config.per_trade_loss_pct / 100.0
-        day_loss_cap = balance * self.config.per_day_loss_pct / 100.0
-
-        pos = ps.positions[acct]
-        if pos is not None:
-            unreal = self.pnl.trade_pnl(acct, ps.symbol)
-            if not pos.trail_armed and unreal >= arm_threshold:
-                pos.trail_armed = True
-                logger.info(
-                    f"[{acct}] {ps.symbol} TRAIL_ARMED  side={pos.side} "
-                    f"entry={pos.entry_price:.5f} now={close:.5f} unreal=${unreal:.2f}"
-                )
-                self._save_state()
+        # Update HLC cache for this bar's FX day.
+        fxs, _ = current_fx_day_anchor(ts_ny)
+        cur = self.fx_day_hlc.get(fxs)
+        if cur is None:
+            self.fx_day_hlc[fxs] = (float(bar.high), float(bar.low), float(bar.close))
         else:
-            unreal = 0.0
+            H, L, _ = cur
+            self.fx_day_hlc[fxs] = (max(H, float(bar.high)),
+                                    min(L, float(bar.low)),
+                                    float(bar.close))
 
-        # 1. EOD 16:55
-        if pos is not None and bar_close_ny.time() == EOD_TIME:
-            await self._exit_position(ps, acct, "EOD_EXIT", close)
+        cpr = self._cpr_for_ts(ts_ny)
+        if cpr is None:
+            logger.warning(f"[{symbol}] {ts_ny.isoformat()} no CPR available — skipping bar")
+            self.last_processed_open_ny = ts_ny
             return
 
-        # 2. Daily breaker
-        running_day_pnl = self.pnl.day_pnl(acct)
-        if not ps.halted[acct] and running_day_pnl <= -day_loss_cap:
-            if pos is not None:
-                logger.warning(f"[{acct}] DAILY_BREAKER tripped (day_pnl=${running_day_pnl:.2f})")
-                await self._exit_position(ps, acct, "DAILY_BREAKER", close)
-            ps.halted[acct] = True
-            self._save_state()
-            return
-
-        # 3. Per-trade SL
-        if pos is not None and unreal <= -trade_loss_cap:
-            logger.warning(f"[{acct}] {ps.symbol} SL_HIT unreal=${unreal:.2f}")
-            await self._exit_position(ps, acct, "SL_HIT", close)
-            pos = None
-            unreal = 0.0
-            # fall through to potentially re-enter on this same bar
-
-        # 4. Trail
-        pos = ps.positions[acct]
-        if pos is not None and pos.trail_armed and ema_val is not None:
-            crossed = (
-                (pos.side == "LONG" and close < ema_val)
-                or (pos.side == "SHORT" and close > ema_val)
+        try:
+            outcome = self.current_strategy.update(
+                timestamp=ts_ny,
+                open_=float(bar.open),
+                high=float(bar.high),
+                low=float(bar.low),
+                close=float(bar.close),
+                daily_tc=cpr.tc,
+                daily_bc=cpr.bc,
+                daily_pp=cpr.pivot,
+                fx_day_start=fxs,
             )
-            if crossed:
-                logger.info(f"[{acct}] {ps.symbol} TRAIL_EXIT close={close:.5f} ema={ema_val:.5f}")
-                await self._exit_position(ps, acct, "TRAIL_EXIT", close)
-
-        # 5. Entry trigger (or reversal)
-        if ps.halted[acct]:
-            return
-        await self._maybe_enter(ps, acct, bar_close_ny, close)
-
-    # ───────────────────────── entry trigger ─────────────────────────
-    async def _maybe_enter(self, ps: _PairState, acct: str,
-                            bar_close_ny: datetime, close: float) -> None:
-        cpr = ps.daily_cpr
-        pct = self.config.entry_trigger_range_pct / 100.0
-        upper = cpr.tc + cpr.tc * pct
-        lower = cpr.bc - cpr.bc * pct
-        in_long = cpr.tc < close <= upper
-        in_short = lower <= close < cpr.bc
-        if not (in_long or in_short):
+        except Exception:
+            logger.exception(f"[{symbol}] strategy.update raised on bar {ts_ny.isoformat()}")
+            self.last_processed_open_ny = ts_ny
             return
 
-        pos = ps.positions[acct]
-        if in_long:
-            if pos is None:
-                await self._open_position(ps, acct, "LONG", close, bar_close_ny)
-            elif pos.side == "SHORT":
-                await self._exit_position(ps, acct, "REVERSE", close)
-                await self._open_position(ps, acct, "LONG", close, bar_close_ny)
-            # already long → ignore
-        elif in_short:
-            if pos is None:
-                await self._open_position(ps, acct, "SHORT", close, bar_close_ny)
-            elif pos.side == "LONG":
-                await self._exit_position(ps, acct, "REVERSE", close)
-                await self._open_position(ps, acct, "SHORT", close, bar_close_ny)
+        self.last_processed_open_ny = ts_ny
+        self.current_fx_day_start = fxs
 
-    async def _open_position(self, ps: _PairState, acct: str,
-                              side: str, price: float, t: datetime) -> None:
-        """
-        Submit an entry order. Only record state if IBKR confirms the fill
-        (or we're in dry-run mode). On rejection/timeout: do NOT record,
-        halt the account so we don't keep firing into a broken state.
-        """
-        ibkr_side = "BUY" if side == "LONG" else "SELL"
-        result = await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
-        status = result.get("status")
-
-        if status == "filled":
-            entry_px = result.get("fill_price") or price
-            ps.positions[acct] = _Position(side=side, entry_price=entry_px, entry_time=t)
-            self.pnl.on_entry(acct, ps.symbol, side, entry_px, LOT_UNITS)
-            logger.info(
-                f"[{acct}] {ps.symbol} OPEN_{side} @{entry_px:.5f} "
-                f"(CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f})"
-            )
-            self._save_state()
-            return
-
-        if status == "dry_run":
-            ps.positions[acct] = _Position(side=side, entry_price=price, entry_time=t)
-            self.pnl.on_entry(acct, ps.symbol, side, price, LOT_UNITS)
-            logger.info(
-                f"[{acct}] {ps.symbol} OPEN_{side} @{price:.5f} "
-                f"(CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f}) [DRY-RUN]"
-            )
-            self._save_state()
-            return
-
-        # Entry rejected/timeout → no fill happened; do NOT record state.
-        # Halt the account to stop further automated activity until reviewed.
-        err = result.get("error") or "unknown error"
-        logger.error(
-            f"[{acct}] {ps.symbol} ENTRY_REJECTED side={side} status={status} "
-            f"reason={err} — no position opened, halting account"
+        # Per-bar heartbeat: always logs the three entry gates + trade flags.
+        # Greppable format: `[BAR] <ts> <asset> close=X | bias=Y regime=Z st=W |
+        # new_trade=... closed=... pos=A→B`.
+        opened_actions = {"ENTRY_LONG", "ENTRY_SHORT",
+                          "REVERSE_TO_LONG", "REVERSE_TO_SHORT"}
+        closed_actions = {"EXIT_FLIP", "EXIT_EOD"}
+        opens = [e for e in outcome.events if e.action in opened_actions]
+        closes = [e for e in outcome.events if e.action in closed_actions]
+        new_trade_str = (
+            f"YES({opens[0].action})" if opens else "no"
         )
-        ps.halted[acct] = True
-        self._save_state()
+        closed_str = (
+            f"YES({closes[0].action})" if closes else "no"
+        )
+        st_str = (
+            "+1 GREEN" if outcome.active_dir == 1
+            else "-1 RED" if outcome.active_dir == -1
+            else " 0  --"
+        )
+        logger.info(
+            f"[BAR] {ts_ny.strftime('%a %m-%d %H:%M')}  asset={symbol}  "
+            f"close={outcome.close:.5f}  |  "
+            f"bias={outcome.bias:<5}  regime={outcome.regime:<18}  st={st_str} "
+            f"({outcome.active_method})  |  "
+            f"new_trade={new_trade_str}  closed={closed_str}  "
+            f"pos={outcome.position_before:+d}→{outcome.position_after:+d}"
+        )
 
-    async def _exit_position(self, ps: _PairState, acct: str,
-                              reason: str, current_price: float) -> None:
-        """
-        Submit an exit order. On confirmed fill (or dry-run), clear state.
-        On rejection/timeout: KEEP the in-memory state — the position likely
-        still exists at IBKR — and halt the account. This is a CRITICAL
-        condition that requires manual intervention.
-        """
-        pos = ps.positions.get(acct)
-        if pos is None:
-            return
-        ibkr_side = "SELL" if pos.side == "LONG" else "BUY"
-        result = await self.ibkr.place_market_order(acct, ps.symbol, ibkr_side, LOT_SIZE)
-        status = result.get("status")
-
-        if status in ("filled", "dry_run"):
-            realized = self.pnl.on_exit(acct, ps.symbol)
-            tag = " [DRY-RUN]" if status == "dry_run" else ""
+        # Surface events. Use position-delta to pick the order side — this
+        # handles all 4 transitions (open long/short, close long/short,
+        # reversal legs) without depending on active_dir, which is wrong
+        # for EXIT_EOD (force-exit doesn't follow an AST flip).
+        running_pos = outcome.position_before
+        for ev in outcome.events:
+            tag = "[LIVE]" if self.config.LIVE_TRADING else "[SHADOW]"
             logger.info(
-                f"[{acct}] {ps.symbol} {reason}  side={pos.side} "
-                f"entry={pos.entry_price:.5f} → {current_price:.5f} "
-                f"realized≈${realized:.2f}{tag}"
+                f"{tag} {symbol}  {ev.action}  @{ev.price:.5f}  "
+                f"bias={ev.bias}  regime={ev.regime}  "
+                f"ast_dir={ev.active_dir} ({ev.active_method})  "
+                f"pos: {running_pos} → {ev.new_position}"
             )
-            ps.positions[acct] = None
+            if self.shadow_log is not None:
+                self.shadow_log.record_event(symbol, ev, cpr.tc, cpr.bc, cpr.pivot)
+
+            if self.config.LIVE_TRADING:
+                delta = ev.new_position - running_pos
+                if delta == 1:
+                    side = "BUY"
+                elif delta == -1:
+                    side = "SELL"
+                else:
+                    logger.error(
+                        f"[LIVE] unexpected position delta {delta} on {ev.action} "
+                        f"(prev={running_pos}, new={ev.new_position}) — skipping order"
+                    )
+                    running_pos = ev.new_position
+                    continue
+                await self._fire_live_order(symbol, ev, side)
+
+            running_pos = ev.new_position
+            # Persist after every event so a crash mid-trade leaves a
+            # consistent file the reconciler can pick up.
             self._save_state()
-            return
 
-        # CRITICAL: exit failed. State preserved on purpose — IBKR likely still
-        # holds the position. Loud log + halt so subsequent bars don't try
-        # to manage a position we can't actually move.
-        err = result.get("error") or "unknown error"
-        logger.critical(
-            f"[{acct}] {ps.symbol} EXIT_REJECTED reason={reason} status={status} "
-            f"ibkr_error={err} — position likely STILL OPEN at IBKR. "
-            f"State preserved. Account halted. MANUAL INTERVENTION REQUIRED."
-        )
-        ps.halted[acct] = True
-        self._save_state()
-
-    # ───────────────────────── FX day rollover ─────────────────────────
-    async def _on_fx_day_rollover(self, ps: _PairState, new_fx_start: datetime) -> None:
-        # Recompute daily CPR from prior FX day.
-        prior_start = new_fx_start - timedelta(days=1)
-        prior_bars = await self.ibkr.fetch_5min_bars(
-            ps.symbol, end_ny=new_fx_start, duration_str="2 D"
-        )
-        in_window = self._filter_window(prior_bars, prior_start, new_fx_start)
-        if in_window:
-            ps.daily_cpr = compute_cpr_from_bars(
-                [b.high for b in in_window],
-                [b.low for b in in_window],
-                [b.close for b in in_window],
+    async def _fire_live_order(self, symbol: str, ev, side: str) -> None:
+        """
+        Live-mode order placement. Side is computed by the caller from the
+        position-delta (BUY for +1, SELL for -1). NO whatIf — real orders.
+        """
+        contract = await self.ibkr.qualify_cfd(symbol)
+        from ib_async import MarketOrder
+        order = MarketOrder(side, self.config.cfd_units)
+        order.account = self.config.cfd_account
+        order.whatIf = False
+        order.tif = "DAY"
+        try:
+            trade = self.ibkr.ib.placeOrder(contract, order)
+            logger.warning(
+                f"[LIVE] submitted: {ev.action} {side} {self.config.cfd_units} "
+                f"{symbol} CFD → account {self.config.cfd_account} "
+                f"orderId={trade.order.orderId}"
             )
-            logger.info(
-                f"{ps.symbol} ROLLOVER → new FX day {new_fx_start.strftime('%a %m-%d')}: "
-                f"daily CPR TC={ps.daily_cpr.tc:.5f} BC={ps.daily_cpr.bc:.5f}"
-            )
-        # Reset per-day state for all accounts.
-        for acct in ps.accounts:
-            self.pnl.reset_day(acct)
-            ps.halted[acct] = False
-        self._save_state()
+        except Exception:
+            logger.exception(f"[LIVE] placeOrder raised for {ev.action} {symbol}")
 
-        # If we crossed a Sunday boundary, re-run weekly selection too. (Skipped in v1
-        # for simplicity — the next session bootstrap handles this on next zone re-entry.)
-
-    # ───────────────────────── helpers ─────────────────────────
+    # ─────────────────── helpers ───────────────────
     @staticmethod
     def _filter_window(bars, start_ny: datetime, end_ny: datetime):
         out = []
         for b in bars:
-            ts = b.date
-            if ts.tzinfo is None:
-                from datetime import timezone as _tz
-                ts = ts.replace(tzinfo=_tz.utc)
-            ts_ny = to_ny(ts)
+            ts_ny = _bar_ts_ny(b)
             if start_ny <= ts_ny < end_ny:
                 out.append(b)
         return out

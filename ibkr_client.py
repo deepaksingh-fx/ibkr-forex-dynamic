@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ib_async import IB, BarDataList, Contract, Forex, MarketOrder, OrderStatus   # type: ignore[import-untyped]
+from ib_async import IB, BarDataList, Contract, Forex, MarketOrder, OrderStatus   # type: ignore[import-untyped]  # noqa: F401
 
 from config import StrategyConfig
 
@@ -98,6 +98,26 @@ class IBKRClient:
         return out
 
     # ───────────────────────── contracts ─────────────────────────
+    async def qualify_cfd(self, symbol: str) -> Contract:
+        """
+        Qualify the FX CFD contract for `symbol` (e.g. 'EURUSD').
+        secType='CFD', exchange='SMART'. Cached.
+
+        Use this for CFD trading (only U25265693 has CFD permission per the
+        whatIf diagnostics). The Forex IDEALPRO contract from qualify_forex
+        cannot be used for CFD orders.
+        """
+        cache_key = f"CFD:{symbol}"
+        if cache_key in self._contracts:
+            return self._contracts[cache_key]
+        base, quote = symbol[:3].upper(), symbol[3:].upper()
+        c = Contract(secType="CFD", symbol=base, currency=quote, exchange="SMART")
+        result = await self.ib.qualifyContractsAsync(c)
+        if not result or result[0] is None:
+            raise RuntimeError(f"Could not qualify CFD contract: {symbol}")
+        self._contracts[cache_key] = result[0]
+        return result[0]
+
     async def qualify_forex(self, symbol: str) -> Contract:
         if symbol in self._contracts:
             return self._contracts[symbol]
@@ -135,6 +155,131 @@ class IBKRClient:
             formatDate=2,
         )
         return list(bars)
+
+    async def determine_effective_close_time(
+        self,
+        symbol: str,
+        sample_days: int = 10,
+    ):
+        """
+        For one symbol, find the mode of the LAST 5-min bar's open-time per
+        FX day across `sample_days` of recent history. That open time equals
+        the close of the second-to-last bar — i.e. the moment we want to
+        force-exit on (5 minutes before the asset's actual close).
+
+        Returns:
+          time(16, 55) NY for normal 24/5 forex pairs (last bar opens 16:55
+          → closes 17:00; force-exit on close of 16:50 → 16:55 bar = 16:55).
+
+        Returns None if no bars are available.
+        """
+        from collections import Counter
+        from time_utils import current_fx_day_anchor, to_ny
+
+        # Use the existing fetch (returns 5-min bars ending now).
+        bars = await self.fetch_5min_bars(
+            symbol,
+            end_ny=__import__("time_utils").ny_now(),
+            duration_str=f"{sample_days} D",
+        )
+        if not bars:
+            return None
+
+        # Bucket by FX day, find last bar's open time per day.
+        per_day_last_open: Dict[Any, Any] = {}
+        for b in bars:
+            ts = b.date
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts_ny = to_ny(ts)
+            fx_start, _ = current_fx_day_anchor(ts_ny)
+            cur = per_day_last_open.get(fx_start)
+            if cur is None or ts_ny > cur:
+                per_day_last_open[fx_start] = ts_ny
+
+        if not per_day_last_open:
+            return None
+
+        # Take the mode of the time-of-day across days, ignoring partial days
+        # (today's in-progress FX day will have a low last-open).
+        # Drop the most recent FX day if it's the current one.
+        keys_sorted = sorted(per_day_last_open.keys())
+        today_start, _ = current_fx_day_anchor()
+        if keys_sorted and keys_sorted[-1] == today_start:
+            keys_sorted = keys_sorted[:-1]
+
+        times = [per_day_last_open[k].time() for k in keys_sorted]
+        if not times:
+            return None
+        counter = Counter(times)
+        return counter.most_common(1)[0][0]
+
+    async def fetch_5min_bars_range(
+        self,
+        symbol: str,
+        start_ny: datetime,
+        end_ny: datetime,
+        chunk_days: int = 25,
+        pace_sleep_s: float = 0.5,
+        max_retries: int = 3,
+        retry_backoff_s: float = 2.0,
+    ) -> List[Any]:
+        """
+        Fetch all 5-min bars across [start_ny, end_ny] by pagination.
+
+        IBKR caps a single 5-min request at ~30 days of bars. We slide a
+        `chunk_days` window backwards from `end_ny` until we cover the start,
+        then concatenate + dedupe by timestamp.
+
+        Throttling defence: if a chunk returns empty unexpectedly (usually an
+        IBKR pacing violation / error 162), retry with exponential backoff
+        up to `max_retries` times before giving up.
+        """
+        if end_ny <= start_ny:
+            raise ValueError(f"end_ny ({end_ny}) must be > start_ny ({start_ny})")
+        cursor = end_ny
+        all_bars: list = []
+        seen_keys: set = set()
+        import asyncio
+        while cursor > start_ny:
+            window_start = max(start_ny, cursor - timedelta(days=chunk_days))
+            duration_days = max(1, (cursor - window_start).days + 1)
+            duration_str = f"{duration_days} D"
+            logger.info(
+                f"fetch_5min_bars_range({symbol}): chunk end={cursor.isoformat()} "
+                f"duration={duration_str}"
+            )
+            chunk = []
+            for attempt in range(max_retries + 1):
+                chunk = await self.fetch_5min_bars(symbol, end_ny=cursor, duration_str=duration_str)
+                if chunk:
+                    break
+                if attempt < max_retries:
+                    backoff = retry_backoff_s * (2 ** attempt)
+                    logger.warning(
+                        f"fetch_5min_bars_range({symbol}): chunk returned 0 bars "
+                        f"(likely IBKR error 162 / pacing); retrying in {backoff:.1f}s "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.error(
+                        f"fetch_5min_bars_range({symbol}): chunk end={cursor.isoformat()} "
+                        f"failed after {max_retries} retries — proceeding with what we have"
+                    )
+            for b in chunk:
+                ts = b.date
+                key = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                all_bars.append(b)
+            cursor = window_start
+            if cursor > start_ny and pace_sleep_s > 0:
+                await asyncio.sleep(pace_sleep_s)
+        # Sort by timestamp ascending (chunks come in reverse-chronological).
+        all_bars.sort(key=lambda b: b.date)
+        return all_bars
 
     async def stream_5min_bars(
         self,

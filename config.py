@@ -1,9 +1,14 @@
 """
 Strategy configuration. Frozen at startup.
 
-The user provides a `StrategyConfig`. All other tunables are constants below.
-The `LIVE_TRADING` flag is the single switch that decides whether real orders
-go to IBKR. Dry-run is the default. See SPEC.md §14 for safety rules.
+The bot is selection-only: it logs the daily-narrowest CPR pair on every
+17:00 NY rollover. No trading inputs (entry bands, loss caps, EMA, etc.)
+are needed.
+
+Broker rules retained for when trade placement is reattached:
+  - LIVE_TRADING gate + read_only coupling (SPEC §7)
+  - LOT_SIZE (IDEALPRO minimum, unused at runtime)
+  - MIN_ACCOUNT_BALANCE_USD ($1000 filter on FA sub-accounts)
 """
 from __future__ import annotations
 
@@ -11,23 +16,18 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-# ─── Hardcoded tunables (NOT strategy inputs) ─────────────────────────────
-LOT_SIZE: float = 0.25                  # 25k units; above IDEALPRO threshold so positions
-                                         # surface cleanly in reqPositionsAsync.
-                                         # Margin ≈ $210/position; 1 pip ≈ $2.50.
-MIN_ACCOUNT_BALANCE_USD: float = 1000   # accounts below this are excluded
-TRAIL_ARM_PCT: float = 0.5              # arm trail at 0.5% of frozen balance
-EMA_PERIOD: int = 50                    # 50-period EMA on 5-min closes
-EMA_PREWARM_BARS: int = 250             # 5x EMA period for clean convergence
+# ─── Hardcoded broker constants (NOT strategy inputs) ─────────────────────
+LOT_SIZE: float = 0.25                  # 25k IDEALPRO base ccy; reserved for future trading
+MIN_ACCOUNT_BALANCE_USD: float = 1000   # FA sub-accounts below this are inactive
 TRADING_ZONE_POLL_SECONDS: int = 60     # outside-zone retry cadence
 
 
-# ─── Default symbol universe ──────────────────────────────────────────────
+# ─── Default symbol universe (13 pairs, user-chosen) ───────────────────────
+# Order matters: narrowest_pair() uses first-appearance for tie-breaking.
 DEFAULT_SYMBOLS: List[str] = [
-    "EURUSD", "USDJPY", "GBPUSD", "USDCHF", "USDCAD",
-    "EURJPY", "EURGBP", "EURCHF", "EURCAD",
-    "GBPJPY", "GBPCHF", "GBPCAD",
-    "CHFJPY", "CADCHF", "CADJPY",
+    "USDJPY", "EURUSD", "EURJPY", "GBPUSD", "GBPJPY",
+    "USDCAD", "CADJPY", "USDCHF", "CHFJPY",
+    "AUDUSD", "AUDJPY", "NZDUSD", "NZDJPY",
 ]
 
 
@@ -37,27 +37,33 @@ class IBKRConnection:
     host: str = "127.0.0.1"
     port: int = 4001                # IB Gateway live; 4002 paper (not used)
     client_id: int = 17
-    read_only: bool = True          # belt-and-suspenders during dev
+    read_only: bool = True          # belt-and-suspenders; auto-disabled for live
     connect_timeout: float = 10.0
     request_timeout: float = 30.0
 
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    """
-    User-provided strategy inputs. Validated in __post_init__.
-
-    See SPEC.md §1.1 for definitions.
-    """
-    # User inputs (see §1.1)
+    """User-provided inputs. Validated in __post_init__."""
+    # Only input: the universe of pairs to consider for daily narrowest-selection.
     symbols_list: tuple[str, ...] = tuple(DEFAULT_SYMBOLS)
-    allowed_currencies: tuple[str, ...] = ()              # MUST be ≥1
-    entry_trigger_range_pct: float = 0.05
-    per_trade_loss_pct: float = 1.0
-    per_day_loss_pct: float = 2.0
 
-    # Live-trading switch — DEFAULT FALSE. Real orders only fire when True.
+    # Live-trading switch — Shadow mode (False) logs decisions only; Live
+    # mode (True) places real orders via IBKRClient.place_market_order.
     LIVE_TRADING: bool = False
+
+    # CFD trading account. Per the whatIf diagnostics only U25265693 has
+    # CFD permission across this user's 4 FA sub-accounts. All orders route
+    # here. (Set to a different account if your setup differs.)
+    cfd_account: str = "U25265693"
+
+    # Historical bars to pre-fetch per pair for indicator warmup at startup
+    # and on each pair-change. 60 days covers the AST 60-day rolling window
+    # for auto-selection scoring + all indicator warmup periods.
+    warmup_days: int = 60
+
+    # Lot size for CFD orders (in base-currency units). 1000 = 0.01 lot.
+    cfd_units: int = 1000
 
     # Paths
     balance_file_path: str = "account_balances.json"
@@ -68,20 +74,7 @@ class StrategyConfig:
     def __post_init__(self) -> None:
         if not self.symbols_list:
             raise ValueError("symbols_list must be non-empty")
-        if not self.allowed_currencies:
-            raise ValueError("allowed_currencies must contain at least one currency")
-        if self.entry_trigger_range_pct <= 0:
-            raise ValueError("entry_trigger_range_pct must be > 0")
-        if self.per_trade_loss_pct <= 0:
-            raise ValueError("per_trade_loss_pct must be > 0")
-        if self.per_day_loss_pct <= 0:
-            raise ValueError("per_day_loss_pct must be > 0")
-
-        # Normalize allowed_currencies to upper-case (frozen tuple swap).
-        upper = tuple(c.upper().strip() for c in self.allowed_currencies)
-        object.__setattr__(self, "allowed_currencies", upper)
-
-        # Live-trading + read_only is contradictory; force read_only=False if going live.
+        # Live-trading + read_only is contradictory; refuse to start.
         if self.LIVE_TRADING and self.ibkr.read_only:
             raise ValueError(
                 "LIVE_TRADING=True requires ibkr.read_only=False. "

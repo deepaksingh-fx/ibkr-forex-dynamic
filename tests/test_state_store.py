@@ -1,4 +1,4 @@
-"""Tests for state_store — atomic JSON persistence."""
+"""Tests for state_store.StateStore."""
 from __future__ import annotations
 
 import json
@@ -6,134 +6,95 @@ from pathlib import Path
 
 import pytest
 
-from state_store import (
-    CURRENT_VERSION,
-    PersistedPosition,
-    PersistedState,
-    StateStore,
-    StateStoreError,
-)
+from state_store import PersistedState, StateStore, StateStoreError, CURRENT_VERSION
 
 
-@pytest.fixture
-def tmp_state_path(tmp_path: Path) -> Path:
-    return tmp_path / "strategy_state.json"
+def test_save_load_roundtrip(tmp_path: Path):
+    store = StateStore(tmp_path / "state.json")
+    s = PersistedState(
+        cfd_account="U25265693",
+        selected_pair="EURUSD",
+        position=1,
+        entry_price=1.0900,
+        entry_timestamp="2026-05-18T13:00:00-04:00",
+        last_processed_open_ny="2026-05-18T13:55:00-04:00",
+    )
+    store.save(s)
+    assert store.exists()
+    loaded = store.load()
+    assert loaded.cfd_account == "U25265693"
+    assert loaded.selected_pair == "EURUSD"
+    assert loaded.position == 1
+    assert loaded.entry_price == 1.0900
+    assert loaded.entry_timestamp == "2026-05-18T13:00:00-04:00"
+    assert loaded.last_processed_open_ny == "2026-05-18T13:55:00-04:00"
+    assert loaded.saved_at != ""   # populated by save()
 
 
-# ────────────────────────────────────────────────────────────
-class TestRoundTrip:
-    def test_save_load_empty(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        store.save(PersistedState())
-        loaded = store.load()
-        assert loaded.version == CURRENT_VERSION
-        assert loaded.positions == {}
-        assert loaded.day_realized == {}
-        assert loaded.halted == {}
-
-    def test_save_load_with_positions(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        s = PersistedState(
-            fx_day_start="2026-05-04T17:00:00-04:00",
-            shortlist=["EURUSD", "USDJPY"],
-            positions={
-                "EURUSD": {
-                    "U25272450": PersistedPosition(
-                        side="LONG", entry_price=1.17338,
-                        entry_time="2026-05-04T11:05:00-04:00",
-                        trail_armed=True,
-                    ),
-                },
-                "USDJPY": {},
-            },
-            day_realized={"U25272450": -23.40, "U25265693": 0.0},
-            halted={"U25272450": False, "U25265693": True},
-        )
-        store.save(s)
-        loaded = store.load()
-        assert loaded.shortlist == ["EURUSD", "USDJPY"]
-        assert "U25272450" in loaded.positions["EURUSD"]
-        p = loaded.positions["EURUSD"]["U25272450"]
-        assert p.side == "LONG"
-        assert p.entry_price == 1.17338
-        assert p.trail_armed is True
-        assert loaded.day_realized["U25272450"] == -23.40
-        assert loaded.halted["U25265693"] is True
-
-    def test_saved_at_is_populated(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        s = PersistedState()
-        assert s.saved_at == ""
-        store.save(s)
-        loaded = store.load()
-        assert loaded.saved_at != ""
-        # Plausibly looks like an ISO timestamp
-        assert "T" in loaded.saved_at and ("+" in loaded.saved_at or "Z" in loaded.saved_at or loaded.saved_at.endswith("00:00"))
+def test_save_is_atomic(tmp_path: Path):
+    """The .tmp file should not persist after save."""
+    store = StateStore(tmp_path / "state.json")
+    store.save(PersistedState(position=0))
+    # No stray .tmp files in the directory.
+    tmps = list(tmp_path.glob(".strategy_state.*"))
+    assert tmps == []
 
 
-class TestErrors:
-    def test_load_missing_file_raises(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        assert not store.exists()
-        with pytest.raises(StateStoreError, match="not found"):
-            store.load()
-
-    def test_load_malformed_json_raises(self, tmp_state_path):
-        tmp_state_path.write_text("{not valid json")
-        store = StateStore(tmp_state_path)
-        with pytest.raises(StateStoreError, match="malformed"):
-            store.load()
-
-    def test_load_wrong_version_raises(self, tmp_state_path):
-        tmp_state_path.write_text(json.dumps({"version": 999, "positions": {}}))
-        store = StateStore(tmp_state_path)
-        with pytest.raises(StateStoreError, match="version"):
-            store.load()
+def test_load_missing_raises(tmp_path: Path):
+    store = StateStore(tmp_path / "absent.json")
+    with pytest.raises(StateStoreError, match="not found"):
+        store.load()
 
 
-class TestExistsAndDelete:
-    def test_exists_false_initially(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        assert store.exists() is False
-
-    def test_exists_after_save(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        store.save(PersistedState())
-        assert store.exists() is True
-
-    def test_delete(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        store.save(PersistedState())
-        assert store.exists()
-        store.delete()
-        assert not store.exists()
-
-    def test_delete_when_missing_is_noop(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        store.delete()  # should not raise
+def test_load_malformed_raises(tmp_path: Path):
+    p = tmp_path / "bad.json"
+    p.write_text("not valid json {")
+    store = StateStore(p)
+    with pytest.raises(StateStoreError, match="malformed"):
+        store.load()
 
 
-class TestAtomicWrite:
-    def test_no_temp_files_left_behind(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        store.save(PersistedState())
-        store.save(PersistedState())
-        store.save(PersistedState())
-        # Only the final file should remain.
-        siblings = list(tmp_state_path.parent.iterdir())
-        suffixes = {p.suffix for p in siblings}
-        assert ".tmp" not in suffixes
-        assert tmp_state_path.exists()
+def test_load_version_mismatch_raises(tmp_path: Path):
+    p = tmp_path / "v999.json"
+    p.write_text(json.dumps({"version": 999, "position": 0}))
+    store = StateStore(p)
+    with pytest.raises(StateStoreError, match="Unsupported state version"):
+        store.load()
 
 
-class TestConsistency:
-    def test_overwrite_preserves_only_latest(self, tmp_state_path):
-        store = StateStore(tmp_state_path)
-        # First save
-        s1 = PersistedState(shortlist=["EURUSD"])
-        store.save(s1)
-        # Second save with different data
-        s2 = PersistedState(shortlist=["GBPUSD", "USDJPY"])
-        store.save(s2)
-        loaded = store.load()
-        assert loaded.shortlist == ["GBPUSD", "USDJPY"]
+def test_delete(tmp_path: Path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(PersistedState(position=0))
+    assert store.exists()
+    store.delete()
+    assert not store.exists()
+    # Idempotent — delete on missing file does not raise.
+    store.delete()
+
+
+def test_save_overwrites_previous(tmp_path: Path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(PersistedState(position=1, entry_price=1.05))
+    store.save(PersistedState(position=-1, entry_price=1.15))
+    loaded = store.load()
+    assert loaded.position == -1
+    assert loaded.entry_price == 1.15
+
+
+def test_position_normalization(tmp_path: Path):
+    """Position values should round-trip as ints, even from JSON strings."""
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({
+        "version": CURRENT_VERSION,
+        "saved_at": "x",
+        "cfd_account": "U25265693",
+        "selected_pair": "EURUSD",
+        "position": "1",   # string, should be coerced
+        "entry_price": None,
+        "entry_timestamp": None,
+        "last_processed_open_ny": None,
+    }))
+    store = StateStore(p)
+    loaded = store.load()
+    assert loaded.position == 1
+    assert isinstance(loaded.position, int)
