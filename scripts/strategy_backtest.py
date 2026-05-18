@@ -7,7 +7,7 @@ same-bar reversal allowed (except on force-exit bar).
 
 Setup per FX day:
   - Compute daily CPR (TC, BC, Pivot) from the PRIOR TRADING FX day's HLC
-    (so Monday uses last Friday's session — `prior_trading_fx_day_window`).
+    (so Monday uses last Friday's session - `prior_trading_fx_day_window`).
   - Use those values for every 5-min bar in this FX day.
 
 Force-exit time is determined empirically per symbol from recent history
@@ -98,7 +98,7 @@ async def run(symbol: str, days: int, output_dir: Path,
         # 1. Effective close time for the symbol.
         close_time = await ibkr.determine_effective_close_time(symbol, sample_days=10)
         if close_time is None:
-            log.warning(f"Could not determine effective close time for {symbol} — using 16:55 NY")
+            log.warning(f"Could not determine effective close time for {symbol} - using 16:55 NY")
             close_time = time(16, 55)
         log.info(f"Force-exit close time for {symbol}: {close_time.strftime('%H:%M')} NY")
 
@@ -106,14 +106,14 @@ async def run(symbol: str, days: int, output_dir: Path,
         now = ny_now()
         start = now - timedelta(days=days + 5)   # +5 so we have at least one prior day for the first FX day's CPR
         log.info(f"Fetching {days + 5}D of 5-min bars for {symbol} "
-                 f"({iso_ny(start)} → {iso_ny(now)})")
+                 f"({iso_ny(start)} -> {iso_ny(now)})")
         bars = await ibkr.fetch_5min_bars_range(symbol, start_ny=start, end_ny=now)
         log.info(f"Got {len(bars)} bars total")
     finally:
         await ibkr.disconnect()
 
     if not bars:
-        print("No bars returned — aborting.")
+        print("No bars returned - aborting.")
         return
 
     buckets = bucket_by_fx_day(bars)
@@ -242,7 +242,7 @@ async def run(symbol: str, days: int, output_dir: Path,
                     })
                     open_trade = None
 
-    # ───────── PERSIST ─────────
+    # --------- PERSIST ---------
     output_dir.mkdir(parents=True, exist_ok=True)
     base = f"{symbol}_{days}d_strategy"
     trades_csv = output_dir / f"{base}_trades.csv"
@@ -278,7 +278,7 @@ async def run(symbol: str, days: int, output_dir: Path,
     reversal_count = sum(1 for t in trades if t["was_reversal"])
 
     lines = []
-    lines.append(f"# Strategy Backtest — {symbol} ({days} days)\n")
+    lines.append(f"# Strategy Backtest - {symbol} ({days} days)\n")
     lines.append(f"Generated: {disp_ny(ny_now())}\n")
     lines.append(f"Force-exit close time: **{close_time.strftime('%H:%M')} NY**")
     lines.append(f"\n## Coverage\n")
@@ -309,10 +309,10 @@ async def run(symbol: str, days: int, output_dir: Path,
     lines.append(f"- Events: `{events_csv.name}` ({len(events)} rows)")
     summary_md.write_text("\n".join(lines) + "\n")
 
-    # ───────── CONSOLE ─────────
+    # --------- CONSOLE ---------
     print()
     print("=" * 100)
-    print(f"STRATEGY BACKTEST — {symbol}  ({used_days} FX days, force-exit at {close_time.strftime('%H:%M')} NY)")
+    print(f"STRATEGY BACKTEST - {symbol}  ({used_days} FX days, force-exit at {close_time.strftime('%H:%M')} NY)")
     print("=" * 100)
     print(f"Trades:        {n_trades}    (wins {wins} / losses {losses}, win rate {win_rate:.1f}%)")
     print(f"Total pts:     {total_pts:+.4f}")

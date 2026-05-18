@@ -9,7 +9,7 @@ Gathers RAW output for every diagnostic the user requested:
      execDetails, commissionReport)
   5. Show contract constructor code
   6. Confirm secType / exchange
-  7. (manual — IBKR TWS UI test, user-side)
+  7. (manual - IBKR TWS UI test, user-side)
   8. Multiple sizes + multiple pairs
   9. Margin/whatIf state dump
 
@@ -38,7 +38,7 @@ def configure_logging():
     )
 
 
-# ───────────────────── event capture ─────────────────────
+# --------------------- event capture ---------------------
 EVENTS: list[dict] = []
 
 
@@ -108,7 +108,7 @@ def _dump_events_since(t0: float):
             print(f"      {k}: {v}")
 
 
-# ───────────────────── helpers ─────────────────────
+# --------------------- helpers ---------------------
 def make_cfd_contract(symbol: str) -> Contract:
     """The exact constructor we use everywhere."""
     base, quote = symbol[:3], symbol[3:]
@@ -126,35 +126,35 @@ async def run_one_test(ib: IB, account: str, symbol: str, units: int,
                        wait_seconds: float = 15.0) -> None:
     """Run one whatIf test and dump everything raw."""
     print("\n" + "=" * 100)
-    print(f"TEST — account={account}  symbol={symbol}  units={units}  whatIf=True")
+    print(f"TEST - account={account}  symbol={symbol}  units={units}  whatIf=True")
     print("=" * 100)
 
-    # ─── Item 5: Constructor code being used ───
+    # --- Item 5: Constructor code being used ---
     print("\n--- (5) CONTRACT CONSTRUCTOR CODE ---")
     print('    contract = Contract(secType="CFD", symbol=<base>, currency=<quote>, exchange="SMART")')
 
-    # ─── Item 1: Raw contract object before qualification ───
+    # --- Item 1: Raw contract object before qualification ---
     contract = make_cfd_contract(symbol)
     print("\n--- (1a) CONTRACT BEFORE qualifyContracts ---")
     print(f"    print(contract):       {contract!r}")
     print(f"    print(vars(contract)): {vars(contract)!r}")
 
-    # ─── Item 3: qualifyContracts (we use the async version under asyncio) ───
+    # --- Item 3: qualifyContracts (we use the async version under asyncio) ---
     print("\n--- (3) qualifyContractsAsync(contract) RAW OUTPUT ---")
     qualified_list = await ib.qualifyContractsAsync(contract)
     print(f"    raw return type: {type(qualified_list)}")
     print(f"    raw return list: {qualified_list!r}")
     if not qualified_list or qualified_list[0] is None:
-        print("    *** qualifyContracts failed — aborting this test ***")
+        print("    *** qualifyContracts failed - aborting this test ***")
         return
     contract = qualified_list[0]
 
-    # ─── Item 1b: Contract after qualification ───
+    # --- Item 1b: Contract after qualification ---
     print("\n--- (1b) CONTRACT AFTER qualifyContracts (this is what we send) ---")
     print(f"    print(contract):       {contract!r}")
     print(f"    print(vars(contract)): {vars(contract)!r}")
 
-    # ─── Item 6: Confirm instrument routing ───
+    # --- Item 6: Confirm instrument routing ---
     print("\n--- (6) INSTRUMENT ROUTING CONFIRMATION ---")
     print(f"    secType  = {contract.secType}   (expected: CFD)")
     print(f"    exchange = {contract.exchange}   (expected: SMART)")
@@ -163,21 +163,21 @@ async def run_one_test(ib: IB, account: str, symbol: str, units: int,
     print(f"    is IDEALPRO?  {contract.exchange == 'IDEALPRO'}")
     print(f"    is SMART?     {contract.exchange == 'SMART'}")
 
-    # ─── Item 2: Order object ───
+    # --- Item 2: Order object ---
     order = MarketOrder("BUY", units)
     order.account = account
-    order.whatIf = True   # ★ preview only — no real placement
+    order.whatIf = True   # * preview only - no real placement
     order.tif = "DAY"
     order.outsideRth = True
 
     print("\n--- (2) ORDER OBJECT ---")
     print(f"    print(order):       {order!r}")
     print(f"    print(vars(order)): {vars(order)!r}")
-    print(f"    order.whatIf = {order.whatIf}   (★ must be True; we do not place real orders)")
+    print(f"    order.whatIf = {order.whatIf}   (* must be True; we do not place real orders)")
 
-    # ─── Place the whatIf order; capture every event in real-time ───
+    # --- Place the whatIf order; capture every event in real-time ---
     t0 = _time.time()
-    print(f"\n--- (4) EVENT CAPTURE — placing whatIf order at t=0 ---")
+    print(f"\n--- (4) EVENT CAPTURE - placing whatIf order at t=0 ---")
     print(f"    waiting up to {wait_seconds:.1f}s for response...")
 
     trade = ib.placeOrder(contract, order)
@@ -208,8 +208,8 @@ async def run_one_test(ib: IB, account: str, symbol: str, units: int,
     print("\n--- Captured events from API during this test (raw): ---")
     _dump_events_since(t0)
 
-    # ─── Item 9: whatIf state / margin response ───
-    print("\n--- (9) whatIf / margin response — raw ---")
+    # --- Item 9: whatIf state / margin response ---
+    print("\n--- (9) whatIf / margin response - raw ---")
     os = getattr(trade, "orderState", None)
     print(f"    trade.orderState type: {type(os)}")
     print(f"    trade.orderState repr: {os!r}")
@@ -240,13 +240,13 @@ async def run(host: str, port: int, client_id: int):
     _attach_handlers(ib)
 
     await ib.connectAsync(host, port, clientId=client_id, readonly=False, timeout=10.0)
-    log.info(f"Connected to {host}:{port} clientId={client_id} (readonly=False — whatIf only)")
+    log.info(f"Connected to {host}:{port} clientId={client_id} (readonly=False - whatIf only)")
     await asyncio.sleep(1.0)
     log.info(f"Managed accounts: {list(ib.managedAccounts())}")
 
     target = "U25265693"
     try:
-        # Item 8 — multiple sizes and pairs.
+        # Item 8 - multiple sizes and pairs.
         await run_one_test(ib, target, "EURUSD", 25000)
         await asyncio.sleep(1.0)
         await run_one_test(ib, target, "EURUSD", 1000)

@@ -8,7 +8,7 @@ Capabilities:
   - qualify forex contracts on IDEALPRO (cached)
   - fetch historical 5-min bars for a window
   - subscribe to streaming 5-min bars (keepUpToDate=True)
-  - place a market order — GATED by LIVE_TRADING; in dry-run, logs intent only.
+  - place a market order - GATED by LIVE_TRADING; in dry-run, logs intent only.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 ORDER_FILL_TIMEOUT_S: float = 15.0
 # Polling interval while waiting.
 _FILL_POLL_INTERVAL_S: float = 0.2
-# Trade-log error code we ignore (odd-lot routing notice — informational).
+# Trade-log error code we ignore (odd-lot routing notice - informational).
 _HARMLESS_LOG_CODES = {399}
 
 
@@ -38,7 +38,7 @@ class IBKRClient:
         self.ib = IB()
         self._contracts: Dict[str, Contract] = {}
 
-    # ───────────────────────── lifecycle ─────────────────────────
+    # ------------------------- lifecycle -------------------------
     async def connect(self) -> None:
         c = self.config.ibkr
         await self.ib.connectAsync(
@@ -62,7 +62,7 @@ class IBKRClient:
     def is_connected(self) -> bool:
         return self.ib.isConnected()
 
-    # ───────────────────────── accounts ─────────────────────────
+    # ------------------------- accounts -------------------------
     def managed_accounts(self) -> List[str]:
         return list(self.ib.managedAccounts())
 
@@ -97,7 +97,7 @@ class IBKRClient:
             out[acct] = netliq if netliq is not None else 0.0
         return out
 
-    # ───────────────────────── contracts ─────────────────────────
+    # ------------------------- contracts -------------------------
     async def qualify_cfd(self, symbol: str) -> Contract:
         """
         Qualify the FX CFD contract for `symbol` (e.g. 'EURUSD').
@@ -136,7 +136,7 @@ class IBKRClient:
                     self._contracts[sym] = q
         return {s: self._contracts[s] for s in symbols if s in self._contracts}
 
-    # ───────────────────────── market data ─────────────────────────
+    # ------------------------- market data -------------------------
     async def fetch_5min_bars(
         self,
         symbol: str,
@@ -164,12 +164,12 @@ class IBKRClient:
         """
         For one symbol, find the mode of the LAST 5-min bar's open-time per
         FX day across `sample_days` of recent history. That open time equals
-        the close of the second-to-last bar — i.e. the moment we want to
+        the close of the second-to-last bar - i.e. the moment we want to
         force-exit on (5 minutes before the asset's actual close).
 
         Returns:
           time(16, 55) NY for normal 24/5 forex pairs (last bar opens 16:55
-          → closes 17:00; force-exit on close of 16:50 → 16:55 bar = 16:55).
+          -> closes 17:00; force-exit on close of 16:50 -> 16:55 bar = 16:55).
 
         Returns None if no bars are available.
         """
@@ -265,7 +265,7 @@ class IBKRClient:
                 else:
                     logger.error(
                         f"fetch_5min_bars_range({symbol}): chunk end={cursor.isoformat()} "
-                        f"failed after {max_retries} retries — proceeding with what we have"
+                        f"failed after {max_retries} retries - proceeding with what we have"
                     )
             for b in chunk:
                 ts = b.date
@@ -310,7 +310,7 @@ class IBKRClient:
         except Exception:
             logger.exception("cancelHistoricalData failed")
 
-    # ───────────────────────── positions (for reconciliation) ─────────────────────────
+    # ------------------------- positions (for reconciliation) -------------------------
     async def get_open_positions(self) -> List[Any]:
         """
         Return list of currently-open positions across all managed accounts.
@@ -318,7 +318,7 @@ class IBKRClient:
         .position (signed quantity), .avgCost.
 
         WARNING: IDEALPRO has a "virtual FX position" threshold (~20k base ccy).
-        Cash forex positions BELOW that threshold do NOT appear here — they
+        Cash forex positions BELOW that threshold do NOT appear here - they
         settle into the multi-currency cash ledger. Use fetch_cash_ledger()
         to detect those.
         """
@@ -332,7 +332,7 @@ class IBKRClient:
         reqPositionsAsync (IDEALPRO virtual FX position rule, ~20k base ccy).
 
         Returns: {currency: signed_balance} excluding the synthetic 'BASE' row.
-        Account base currency (typically USD on these FA subs) is included —
+        Account base currency (typically USD on these FA subs) is included -
         callers usually skip it because it's indistinguishable from natural
         cash, but it's available if needed.
         """
@@ -353,7 +353,7 @@ class IBKRClient:
                 continue
         return out
 
-    # ───────────────────────── orders (DRY-RUN GATED) ─────────────────────────
+    # ------------------------- orders (DRY-RUN GATED) -------------------------
     async def place_market_order(
         self,
         account: str,
@@ -376,8 +376,8 @@ class IBKRClient:
           }
 
         Caller MUST branch on `status`:
-          - "filled" / "dry_run"  → state may be updated
-          - "rejected" / "timeout"→ state must NOT be updated; account should halt
+          - "filled" / "dry_run"  -> state may be updated
+          - "rejected" / "timeout"-> state must NOT be updated; account should halt
         """
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be BUY|SELL, got {side!r}")
@@ -396,7 +396,7 @@ class IBKRClient:
             logger.info(f"[DRY-RUN] Would place: {intent}")
             return {"status": "dry_run", "intent": intent, **empty}
 
-        # Live path — guarded by config. Should never reach here in dev.
+        # Live path - guarded by config. Should never reach here in dev.
         contract = await self.qualify_forex(symbol)
         order = MarketOrder(side, lot_units)
         order.account = account

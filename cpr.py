@@ -1,15 +1,15 @@
 """
 CPR computation. Pure, no I/O.
 
-Standard formulas (SPEC §5):
+Standard formulas (SPEC sec5):
     Pivot  = (H + L + C) / 3
     BC     = (H + L) / 2
-    TC_raw = 2·Pivot − BC
+    TC_raw = 2*Pivot - BC
 
-Then enforce TC ≥ BC by swapping if needed.
+Then enforce TC >= BC by swapping if needed.
 
-Width metric (SPEC §9.2):
-    width_pct = (TC − BC) / Pivot × 100      # standard CPR-literature denominator
+Width metric (SPEC sec9.2):
+    width_pct = (TC - BC) / Pivot x 100      # standard CPR-literature denominator
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ class CPR:
 
 
 def compute_cpr_from_hlc(high: float, low: float, close: float) -> CPR:
-    """Compute CPR from a window's H, L, C. Force TC ≥ BC."""
+    """Compute CPR from a window's H, L, C. Force TC >= BC."""
     if high < low:
         raise ValueError(f"high ({high}) < low ({low})")
     if close <= 0 or high <= 0 or low <= 0:
@@ -67,7 +67,7 @@ def compute_cpr_from_bars(
     C = the LAST bar's close (i.e. closes[-1])
     """
     if not highs or not lows or not closes:
-        raise ValueError("Empty bar sequence — cannot compute CPR")
+        raise ValueError("Empty bar sequence - cannot compute CPR")
     if not (len(highs) == len(lows) == len(closes)):
         raise ValueError("highs/lows/closes lengths must match")
     H = max(highs)

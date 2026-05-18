@@ -6,7 +6,7 @@ The bot is selection-only: it logs the daily-narrowest CPR pair on every
 are needed.
 
 Broker rules retained for when trade placement is reattached:
-  - LIVE_TRADING gate + read_only coupling (SPEC §7)
+  - LIVE_TRADING gate + read_only coupling (SPEC sec7)
   - LOT_SIZE (IDEALPRO minimum, unused at runtime)
   - MIN_ACCOUNT_BALANCE_USD ($1000 filter on FA sub-accounts)
 """
@@ -16,13 +16,13 @@ from dataclasses import dataclass, field
 from typing import List
 
 
-# ─── Hardcoded broker constants (NOT strategy inputs) ─────────────────────
+# --- Hardcoded broker constants (NOT strategy inputs) ---------------------
 LOT_SIZE: float = 0.25                  # 25k IDEALPRO base ccy; reserved for future trading
 MIN_ACCOUNT_BALANCE_USD: float = 1000   # FA sub-accounts below this are inactive
 TRADING_ZONE_POLL_SECONDS: int = 60     # outside-zone retry cadence
 
 
-# ─── Default symbol universe (13 pairs, user-chosen) ───────────────────────
+# --- Default symbol universe (13 pairs, user-chosen) -----------------------
 # Order matters: narrowest_pair() uses first-appearance for tie-breaking.
 DEFAULT_SYMBOLS: List[str] = [
     "USDJPY", "EURUSD", "EURJPY", "GBPUSD", "GBPJPY",
@@ -48,7 +48,7 @@ class StrategyConfig:
     # Only input: the universe of pairs to consider for daily narrowest-selection.
     symbols_list: tuple[str, ...] = tuple(DEFAULT_SYMBOLS)
 
-    # Live-trading switch — Shadow mode (False) logs decisions only; Live
+    # Live-trading switch - Shadow mode (False) logs decisions only; Live
     # mode (True) places real orders via IBKRClient.place_market_order.
     LIVE_TRADING: bool = False
 
@@ -78,5 +78,5 @@ class StrategyConfig:
         if self.LIVE_TRADING and self.ibkr.read_only:
             raise ValueError(
                 "LIVE_TRADING=True requires ibkr.read_only=False. "
-                "Refusing to start with conflicting flags — fix your config."
+                "Refusing to start with conflicting flags - fix your config."
             )

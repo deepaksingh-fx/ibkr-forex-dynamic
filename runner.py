@@ -1,5 +1,5 @@
 """
-forex_cpr_ibkr — entry point.
+forex_cpr_ibkr - entry point.
 
     python runner.py                          # SHADOW mode (no orders)
     python runner.py --live --i-really-mean-it  # LIVE mode (real CFD orders)
@@ -17,7 +17,7 @@ to backtest_output/shadow/shadow_events_<session>.csv. Trades are rolled
 up into shadow_trades_<session>.csv with points + pips.
 
 Live mode: real CFD market orders are placed on cfd_account (default
-U25265693 — the only account with CFD permission per diagnostics).
+U25265693 - the only account with CFD permission per diagnostics).
 Requires BOTH --live AND --i-really-mean-it flags.
 """
 from __future__ import annotations
@@ -78,7 +78,7 @@ def configure_logging(verbose: bool) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="forex_cpr_ibkr — CPR/Regime/AST strategy with shadow + live modes"
+        description="forex_cpr_ibkr - CPR/Regime/AST strategy with shadow + live modes"
     )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=4001)
@@ -93,7 +93,7 @@ def main() -> int:
     p.add_argument("--verbose", "-v", action="store_true")
     # Live flags retained as plumbing for future trading rules.
     p.add_argument("--live", action="store_true",
-                   help="LIVE mode — places real CFD orders. Default is SHADOW (no orders).")
+                   help="LIVE mode - places real CFD orders. Default is SHADOW (no orders).")
     p.add_argument("--i-really-mean-it", action="store_true",
                    help="Required with --live to confirm intent to place REAL orders.")
     args = p.parse_args()
@@ -105,7 +105,7 @@ def main() -> int:
 
     if cfg.LIVE_TRADING:
         log.warning("=" * 60)
-        log.warning("LIVE_TRADING enabled — socket is NOT read-only.")
+        log.warning("LIVE_TRADING enabled - socket is NOT read-only.")
         log.warning("(This build does not place orders regardless.)")
         log.warning("=" * 60)
     else:
@@ -131,7 +131,7 @@ def main() -> int:
     asyncio.set_event_loop(loop)
 
     def shutdown(signum, frame):
-        log.info(f"Signal {signum} received — stopping...")
+        log.info(f"Signal {signum} received - stopping...")
         strategy.stop()
 
     signal.signal(signal.SIGINT, shutdown)

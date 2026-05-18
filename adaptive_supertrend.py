@@ -1,15 +1,15 @@
 """
-Adaptive SuperTrend with auto method selection — Python port of the Pine v6
+Adaptive SuperTrend with auto method selection - Python port of the Pine v6
 "Adaptive SuperTrend - Auto Method Selection V3.4" indicator.
 
 Six SuperTrend variants run in parallel, each with its own ATR-multiplier
 calculation:
-  0. Percentile     — multiplier scales with percentile rank of ATR
-  1. Regime         — switches multiplier on low/normal/high ATR regime
-  2. Z-Score        — multiplier scales with z-score of ATR
-  3. Dynamic Period — base multiplier but ATR period varies with vol score
-  4. Rate of Change — multiplier scales with |ROC|
-  5. Hybrid         — EMA-smoothed average of the other five multipliers
+  0. Percentile     - multiplier scales with percentile rank of ATR
+  1. Regime         - switches multiplier on low/normal/high ATR regime
+  2. Z-Score        - multiplier scales with z-score of ATR
+  3. Dynamic Period - base multiplier but ATR period varies with vol score
+  4. Rate of Change - multiplier scales with |ROC|
+  5. Hybrid         - EMA-smoothed average of the other five multipliers
 
 Each method maintains its own per-bar SuperTrend state and a rolling
 trade-simulator (mark-to-flip points). Every `eval_interval_bars`, the
@@ -53,7 +53,7 @@ METHOD_NAMES = ["Percentile", "Regime", "Z-Score", "Dynamic Period",
 METHOD_INDEX = {n: i for i, n in enumerate(METHOD_NAMES)}
 
 
-# ─── Config ─────────────────────────────────────────────────────────────
+# --- Config -------------------------------------------------------------
 @dataclass(frozen=True)
 class AdaptiveSTConfig:
     # Base
@@ -139,7 +139,7 @@ class AdaptiveSTConfig:
             raise ValueError("Need 2 <= min_atr < max_atr")
 
 
-# ─── Trade simulator ────────────────────────────────────────────────────
+# --- Trade simulator ----------------------------------------------------
 @dataclass
 class _Trade:
     bar_idx: int
@@ -160,7 +160,7 @@ class _TradeSimulator:
         self.entry_bar: Optional[int] = None
 
     def on_flip(self, prev_dir: int, bar_idx: int, close: float):
-        """Direction just flipped from prev_dir → new_dir at bar_idx, close=close."""
+        """Direction just flipped from prev_dir -> new_dir at bar_idx, close=close."""
         if self.entry_price is not None and prev_dir != 0:
             pts = (close - self.entry_price) if prev_dir == 1 else (self.entry_price - close)
             self.trades.append(_Trade(bar_idx=bar_idx, points=pts, bars=bar_idx - (self.entry_bar or bar_idx)))
@@ -191,7 +191,7 @@ class _TradeSimulator:
         return round(sum(t.bars for t in self.trades) / len(self.trades))
 
 
-# ─── Per-method SuperTrend state ────────────────────────────────────────
+# --- Per-method SuperTrend state ----------------------------------------
 @dataclass
 class _MethodState:
     prev_upper: Optional[float] = None
@@ -203,7 +203,7 @@ class _MethodState:
     last_atr: Optional[float] = None
 
 
-# ─── Output snapshot ────────────────────────────────────────────────────
+# --- Output snapshot ----------------------------------------------------
 @dataclass(frozen=True)
 class AdaptiveSnapshot:
     timestamp: datetime
@@ -258,7 +258,7 @@ class AdaptiveSnapshot:
     method_scores: list[float]
 
 
-# ─── Adaptive SuperTrend ────────────────────────────────────────────────
+# --- Adaptive SuperTrend ------------------------------------------------
 class AdaptiveSuperTrend:
     def __init__(self, config: AdaptiveSTConfig, bars_per_day: int = 288):
         self.config = config
@@ -310,7 +310,7 @@ class AdaptiveSuperTrend:
         self.bar_index: int = -1
         self.prev_close: Optional[float] = None
 
-    # ───────────────────────── helpers ─────────────────────────
+    # ------------------------- helpers -------------------------
     def _dyn_period(self, vol_score: Optional[float]) -> Optional[float]:
         if vol_score is None:
             return None
@@ -331,7 +331,7 @@ class AdaptiveSuperTrend:
     def _method_atr(self, idx: int, atr_base: Optional[float], dyn_atr: Optional[float]) -> Optional[float]:
         return dyn_atr if idx == 3 else atr_base
 
-    # ───────────────────────── main update ─────────────────────────
+    # ------------------------- main update -------------------------
     def update(self, timestamp: datetime, open_: float, high: float,
                low: float, close: float) -> AdaptiveSnapshot:
         self.bar_index += 1
@@ -540,7 +540,7 @@ class AdaptiveSuperTrend:
             method_scores=method_scores,
         )
 
-    # ───────────────────────── auto-selection scoring ─────────────────────────
+    # ------------------------- auto-selection scoring -------------------------
     def _method_score(self, idx: int) -> float:
         cnt = self.trades[idx].count()
         if cnt < self.config.min_trades:
@@ -553,7 +553,7 @@ class AdaptiveSuperTrend:
         # Average Per Trade (default)
         return self.trades[idx].total_points() / cnt
 
-    # ───────────────────────── live trade state ─────────────────────────
+    # ------------------------- live trade state -------------------------
     def _sl_dist_now(self, close: float, atr: Optional[float]) -> Optional[float]:
         cfg = self.config
         if cfg.tsl_method == "ATR":
@@ -599,7 +599,7 @@ class AdaptiveSuperTrend:
         old_dir = self.live_dir
         new_dir = old_dir
 
-        # State machine — independent ifs, in Pine order.
+        # State machine - independent ifs, in Pine order.
         # (Signal-induced flips first; TSL exits later only if no opposite signal.)
         if old_dir == 0 and bull_signal:
             new_dir = 1

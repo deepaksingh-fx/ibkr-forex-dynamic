@@ -1,5 +1,5 @@
 """
-Streaming indicator helpers — Python ports of the Pine v6 `ta.*` functions
+Streaming indicator helpers - Python ports of the Pine v6 `ta.*` functions
 used by the regime classifier and adaptive SuperTrend.
 
 All indicators are bar-by-bar stateful: feed one value at a time via
@@ -11,7 +11,7 @@ Functions implemented (with their Pine equivalents):
   - WilderATR         ~ ta.atr(N)        = ta.rma(ta.tr(true), N)
   - SMA               ~ ta.sma(N)
   - EMA               ~ ta.ema(N)
-  - Stdev             ~ ta.stdev(N)      (population — Pine default biased=true)
+  - Stdev             ~ ta.stdev(N)      (population - Pine default biased=true)
   - RSI               ~ ta.rsi(N)        (Wilder smoothing on gains/losses)
   - MACD              ~ ta.macd(fast, slow, signal)
   - PercentRank       ~ ta.percentrank(N)
@@ -204,7 +204,7 @@ class RSI:
 
 
 class MACD:
-    """MACD: (line, signal, hist) — all None until warm-up completes."""
+    """MACD: (line, signal, hist) - all None until warm-up completes."""
 
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
         if fast >= slow:

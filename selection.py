@@ -1,5 +1,5 @@
 """
-Daily-narrowest pair selection (SPEC §5). Pure, no I/O.
+Daily-narrowest pair selection (SPEC sec5). Pure, no I/O.
 
 Pick the symbol in `symbols_list` with the lowest CPR width %. Ties resolve
 to the first appearance in `symbols_list`.

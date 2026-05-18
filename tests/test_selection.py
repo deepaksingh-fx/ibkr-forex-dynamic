@@ -47,7 +47,7 @@ class TestTieBreaker:
         cprs = {s: _cpr_with_width_pct(0.20) for s in DEFAULT_SYMBOLS}
         cprs["USDJPY"] = _cpr_with_width_pct(0.05)   # tied
         cprs["GBPUSD"] = _cpr_with_width_pct(0.05)   # tied
-        # USDJPY appears earlier in DEFAULT_SYMBOLS → wins.
+        # USDJPY appears earlier in DEFAULT_SYMBOLS -> wins.
         assert narrowest_pair(DEFAULT_SYMBOLS, cprs) == "USDJPY"
 
     def test_all_equal_returns_first(self):

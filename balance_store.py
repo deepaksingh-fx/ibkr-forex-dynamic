@@ -1,11 +1,11 @@
 """
-JSON balance store with $1000+ filter (SPEC §12.2 + §13.0).
+JSON balance store with $1000+ filter (SPEC sec12.2 + sec13.0).
 
 First run: fetch from IBKR, write file.
 Subsequent runs: read only, never overwrite.
-File corruption → raise, manual fix required.
+File corruption -> raise, manual fix required.
 
-Active accounts = balances ≥ MIN_ACCOUNT_BALANCE_USD ($1000).
+Active accounts = balances >= MIN_ACCOUNT_BALANCE_USD ($1000).
 Inactive accounts get NO orders, NO PnL subscriptions, NO loss caps.
 """
 from __future__ import annotations
@@ -59,7 +59,7 @@ class BalanceStore:
 
     def all_balances(self) -> Dict[str, float]:
         if self._balances is None:
-            raise BalanceStoreError("BalanceStore not loaded — call load() or init_from()")
+            raise BalanceStoreError("BalanceStore not loaded - call load() or init_from()")
         return dict(self._balances)
 
     def active_accounts(self) -> Dict[str, float]:

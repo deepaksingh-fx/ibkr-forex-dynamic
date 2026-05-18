@@ -4,22 +4,22 @@ CPR + Regime + Adaptive SuperTrend strategy (single pair, per-bar).
 Three-gate entry, single-rule exit, same-bar reversal.
 
 ENTRY (all three must align on a 5-min candle close, position is FLAT):
-  Gate 1 — CPR bias:
+  Gate 1 - CPR bias:
       bias = LONG  if close >  TC
              SHORT if close <  BC
-             NONE  if BC ≤ close ≤ TC
-  Gate 2 — Regime is DIRECTIONAL (UP or DOWN — the direction itself does
+             NONE  if BC <= close <= TC
+  Gate 2 - Regime is DIRECTIONAL (UP or DOWN - the direction itself does
            not need to match the bias; either DIRECTIONAL_* regime passes).
-           NON_DIRECTIONAL / MEAN_REVERTING / WARMING_UP → blocks entry.
-  Gate 3 — Adaptive SuperTrend direction aligns with bias:
-              bias LONG   → active_dir ==  1   (green)
-              bias SHORT  → active_dir == -1   (red)
+           NON_DIRECTIONAL / MEAN_REVERTING / WARMING_UP -> blocks entry.
+  Gate 3 - Adaptive SuperTrend direction aligns with bias:
+              bias LONG   -> active_dir ==  1   (green)
+              bias SHORT  -> active_dir == -1   (red)
 
 EXIT (single rule for now):
   SuperTrend flip against the current position:
-      LONG  & active_dir flips  1 → -1  → close LONG
-      SHORT & active_dir flips -1 → 1   → close SHORT
-  (Chart-visual definition — any bar-over-bar change in active_dir counts,
+      LONG  & active_dir flips  1 -> -1  -> close LONG
+      SHORT & active_dir flips -1 -> 1   -> close SHORT
+  (Chart-visual definition - any bar-over-bar change in active_dir counts,
   including the rare method-switch artefact.)
 
 FORCE EXIT:
@@ -35,7 +35,7 @@ SAME-BAR REVERSAL:
 
 POSITION RULES:
   One position at a time. While long, ignore further long-entry conditions
-  (and vice versa). Bias only gates new entries — held positions are not
+  (and vice versa). Bias only gates new entries - held positions are not
   re-evaluated against bias.
 
 The classifier is stateful. Feed bars chronologically via .update(...).
@@ -144,7 +144,7 @@ class CPRSuperTrendStrategy:
         # the first bar where active_dir is non-zero.
         self._prev_active_dir: int = 0
 
-    # ──────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def update(
         self,
         timestamp: datetime,
@@ -193,7 +193,7 @@ class CPRSuperTrendStrategy:
         events: list[StrategyEvent] = []
         position_before = self.position
 
-        # ─── EXIT logic ───
+        # --- EXIT logic ---
         # 1a. Force-exit at EOD (highest priority).
         if self.position != 0 and is_force_exit_bar:
             events.append(self._exit_event(
@@ -211,8 +211,8 @@ class CPRSuperTrendStrategy:
             self._close_position()
             # Same-bar reversal evaluation happens below in the ENTRY block.
 
-        # ─── ENTRY logic (only when flat) ───
-        # No new entries on the force-exit bar — even if all three gates would
+        # --- ENTRY logic (only when flat) ---
+        # No new entries on the force-exit bar - even if all three gates would
         # otherwise align (including the same-bar reversal case after a flip).
         if self.position == 0 and not is_force_exit_bar:
             if (bias_int != 0
@@ -258,7 +258,7 @@ class CPRSuperTrendStrategy:
             events=events,
         )
 
-    # ─── helpers ───
+    # --- helpers ---
     def _exit_event(
         self, ts, price, action, reason, bias, r_snap, reg_dir,
         active_dir, active_method,

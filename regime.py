@@ -1,5 +1,5 @@
 """
-Market-regime classifier — Python port of the Pine v6 "Regime Decider".
+Market-regime classifier - Python port of the Pine v6 "Regime Decider".
 
 Classifies each 5-min bar into one of:
   - DIRECTIONAL_UP / DIRECTIONAL_DOWN
@@ -10,7 +10,7 @@ Classifies each 5-min bar into one of:
 Methodology (matches the Pine indicator):
 
   Metric 1: Efficiency Ratio (Kaufman) over last `er_len` bars
-    ER = |close - close[er_len]| / Σ |close[i] - close[i-1]|
+    ER = |close - close[er_len]| / Sum |close[i] - close[i-1]|
     Bounded [0, 1]. 1 = pure trend, 0 = pure noise.
 
   Metric 2: Close-to-close crossings of the daily PP over last `cross_len`
@@ -18,9 +18,9 @@ Methodology (matches the Pine indicator):
     just changed value, which would create a spurious cross).
 
 Classification (priority, mutually exclusive):
-  1. ER hysteresis says directional → DIRECTIONAL_UP / DIRECTIONAL_DOWN
-  2. else crossings ≥ threshold → MEAN_REVERTING
-  3. else → NON_DIRECTIONAL
+  1. ER hysteresis says directional -> DIRECTIONAL_UP / DIRECTIONAL_DOWN
+  2. else crossings >= threshold -> MEAN_REVERTING
+  3. else -> NON_DIRECTIONAL
 
 ER hysteresis: sticky. Enter directional when ER > er_enter; exit only when
 ER < er_exit. Prevents flicker near the threshold.
@@ -94,7 +94,7 @@ class RegimeClassifier:
         # Closes ring: holds up to er_len + 1 (so closes[0] is close[er_len]
         # once full, the reference for net_change in the ER formula).
         self._closes: deque[float] = deque(maxlen=config.er_len + 1)
-        # Per-bar |Δclose| for the ER denominator.
+        # Per-bar |deltaclose| for the ER denominator.
         self._bar_changes: deque[float] = deque(maxlen=config.er_len)
         # Rolling crossing flags (1 = crossed PP this bar, 0 = didn't).
         self._crosses: deque[int] = deque(maxlen=config.cross_len)
@@ -134,10 +134,10 @@ class RegimeClassifier:
             crossed = False
         self._crosses.append(1 if crossed else 0)
 
-        # Push current close AFTER computing Δ (so it's bar t, not bar t+1).
+        # Push current close AFTER computing delta (so it's bar t, not bar t+1).
         self._closes.append(close)
 
-        # ER: needs er_len Δ-samples AND closes[0] anchored er_len bars back.
+        # ER: needs er_len delta-samples AND closes[0] anchored er_len bars back.
         er: Optional[float] = None
         if (len(self._bar_changes) == cfg.er_len
                 and len(self._closes) == cfg.er_len + 1):
@@ -147,7 +147,7 @@ class RegimeClassifier:
 
         crossings = sum(self._crosses)
 
-        # Hysteresis state machine — only updates when ER is computable.
+        # Hysteresis state machine - only updates when ER is computable.
         if er is not None:
             if not self._in_directional and er > cfg.er_enter:
                 self._in_directional = True

@@ -1,5 +1,5 @@
 """
-whatIf preview — submits an order with order.whatIf = True so IBKR returns
+whatIf preview - submits an order with order.whatIf = True so IBKR returns
 margin/commission analysis WITHOUT routing to the market. Nothing is filled,
 no money moves.
 
@@ -44,7 +44,7 @@ def _funded_accounts(ib: IB, min_balance_usd: float = 1000.0) -> List[str]:
 
 
 async def main():
-    p = argparse.ArgumentParser(description="whatIf preview — no real orders")
+    p = argparse.ArgumentParser(description="whatIf preview - no real orders")
     p.add_argument("--lot", type=float, required=True,
                    help="Lot size, e.g. 0.05, 0.25, 1.0")
     p.add_argument("--side", choices=["BUY", "SELL"], required=True,
@@ -62,7 +62,7 @@ async def main():
     units = int(args.lot * 100_000)
 
     print("=" * 64)
-    print(f" whatIf preview — NO real orders fire")
+    print(f" whatIf preview - NO real orders fire")
     print(f"   side    : {args.side}")
     print(f"   symbol  : {args.symbol}")
     print(f"   lot     : {args.lot}  ({units:,} units)")

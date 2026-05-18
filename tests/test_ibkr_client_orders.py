@@ -18,7 +18,7 @@ from config import IBKRConnection, StrategyConfig
 from ibkr_client import IBKRClient
 
 
-# ─── Fakes for ib_async Trade / OrderStatus / log entries ────────────────
+# --- Fakes for ib_async Trade / OrderStatus / log entries ----------------
 @dataclass
 class _FakeStatus:
     status: str = "PendingSubmit"
@@ -46,7 +46,7 @@ def _config(live: bool = True) -> StrategyConfig:
     )
 
 
-# ─── _wait_for_terminal_status ───────────────────────────────────────────
+# --- _wait_for_terminal_status -------------------------------------------
 class TestWaitForTerminalStatus:
     def test_returns_immediately_when_already_filled(self):
         client = IBKRClient(_config(live=True))
@@ -89,7 +89,7 @@ class TestWaitForTerminalStatus:
         assert result == "Inactive"
 
 
-# ─── _extract_rejection_reason ───────────────────────────────────────────
+# --- _extract_rejection_reason -------------------------------------------
 class TestExtractRejectionReason:
     def test_returns_default_when_log_empty(self):
         trade = _FakeTrade()
@@ -98,7 +98,7 @@ class TestExtractRejectionReason:
     def test_returns_real_error_when_present(self):
         trade = _FakeTrade(log=[
             _FakeLogEntry(status="Cancelled", errorCode=201,
-                          message="Order rejected — leverage"),
+                          message="Order rejected - leverage"),
         ])
         reason = IBKRClient._extract_rejection_reason(trade)
         assert "201" in reason
@@ -126,7 +126,7 @@ class TestExtractRejectionReason:
         assert "leveraged" in reason
 
 
-# ─── place_market_order — dry-run path ───────────────────────────────────
+# --- place_market_order - dry-run path -----------------------------------
 class TestPlaceMarketOrderDryRun:
     def test_dry_run_returns_dry_run_status(self):
         client = IBKRClient(_config(live=False))
@@ -140,7 +140,7 @@ class TestPlaceMarketOrderDryRun:
         assert result["intent"]["lot_units"] == 5000
 
 
-# ─── place_market_order — live path with mocked ib.placeOrder ────────────
+# --- place_market_order - live path with mocked ib.placeOrder ------------
 class _FakeIB:
     """Minimal stand-in for ib_async.IB used inside IBKRClient for this test."""
 

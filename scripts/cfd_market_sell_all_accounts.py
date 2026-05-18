@@ -180,9 +180,9 @@ async def run(host: str, port: int, client_id: int, units: int, symbol: str):
         ib.disconnect()
         log.info("Disconnected")
 
-    # ─── REPORT ───
+    # --- REPORT ---
     print("\n" + "=" * 110)
-    print(f"PER-ACCOUNT OUTCOME — SELL 1000 EURUSD CFD (0.01 lot)")
+    print(f"PER-ACCOUNT OUTCOME - SELL 1000 EURUSD CFD (0.01 lot)")
     print("=" * 110)
     print(f"{'Account':<12} {'orderId':>8} {'permId':>14} {'status':<14} "
           f"{'filled':>7} {'avg_fill':>10}  errors")
@@ -190,16 +190,16 @@ async def run(host: str, port: int, client_id: int, units: int, symbol: str):
     for r in results:
         errs = ", ".join(f"{e.get('errorCode')}:{(e.get('errorString') or '')[:40]}" for e in r["errors"])
         print(f"{r['account']:<12} {str(r['orderId'] or ''):>8} {str(r['permId'] or ''):>14} "
-              f"{str(r['final_status'] or '—'):<14} "
+              f"{str(r['final_status'] or '-'):<14} "
               f"{r['filled']:>7.1f} {r['avg_fill_price']:>10.5f}  "
-              f"{errs or '—'}")
+              f"{errs or '-'}")
 
     print()
     print("=" * 110)
     print("FULL PER-ACCOUNT DETAIL (raw)")
     print("=" * 110)
     for r in results:
-        print(f"\n────── {r['account']} ──────")
+        print(f"\n------ {r['account']} ------")
         if r["exception"]:
             print(f"  PYTHON EXCEPTION: {r['exception']}")
             continue
@@ -228,7 +228,7 @@ async def run(host: str, port: int, client_id: int, units: int, symbol: str):
     print("POSITION SNAPSHOT AFTER SELL")
     print("=" * 110)
     if not positions_after:
-        print("  (no open positions — all positions are flat)")
+        print("  (no open positions - all positions are flat)")
     for p in positions_after:
         print(f"  {p.account:<12} {p.contract.secType:<5} "
               f"{p.contract.symbol}/{p.contract.currency:<5} "

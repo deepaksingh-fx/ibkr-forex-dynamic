@@ -1,14 +1,14 @@
 """
 Decisive CFD order routing test.
 
-Places a REAL LimitOrder (whatIf=False) for 1000 EURUSD CFD @ limit 0.5 —
+Places a REAL LimitOrder (whatIf=False) for 1000 EURUSD CFD @ limit 0.5 -
 absurdly far below market (~1.16), so it CANNOT fill unless EURUSD collapses
 ~57% in 25 seconds. After the observation window, the order is CANCELLED.
 
 Isolates whether:
-  - Only the whatIf preview path is broken → real LMT order will get a
+  - Only the whatIf preview path is broken -> real LMT order will get a
     permId, status updates, openOrder callbacks, normal lifecycle.
-  - OR all CFD routing is broken on U25265693 → real LMT order will ALSO
+  - OR all CFD routing is broken on U25265693 -> real LMT order will ALSO
     hang in PendingSubmit / never get a permId.
 
 Safety:
@@ -129,11 +129,11 @@ async def run(host: str, port: int, client_id: int, account: str):
         # Build the safe LimitOrder. 0.5 << 1.16 market = no fill risk.
         order = LimitOrder("BUY", 1000, 0.5)
         order.account = account
-        order.whatIf = False        # ★ REAL submission this time
+        order.whatIf = False        # * REAL submission this time
         order.outsideRth = False
         order.tif = "DAY"
         # Belt and suspenders: also set a transmit guard so the order doesn't
-        # get transmitted unless we want — but ib_async needs transmit=True
+        # get transmitted unless we want - but ib_async needs transmit=True
         # for the order to actually be sent. Keeping it True; the safety is
         # the absurdly-low price.
         order.transmit = True
@@ -141,7 +141,7 @@ async def run(host: str, port: int, client_id: int, account: str):
         print("\n--- ORDER ---")
         print(f"    {order!r}")
         print(f"    vars: {vars(order)}")
-        print(f"    safety: limit=0.5, market is ~1.16 → 57% out-of-money, CANNOT FILL")
+        print(f"    safety: limit=0.5, market is ~1.16 -> 57% out-of-money, CANNOT FILL")
 
         t0 = _time.time()
         print(f"\n--- PLACING REAL LIMIT ORDER (whatIf=False) at t=0 ---")
@@ -157,7 +157,7 @@ async def run(host: str, port: int, client_id: int, account: str):
         print("\n--- ALL EVENTS CAPTURED DURING WATCH WINDOW ---")
         _dump_events_since(t0)
 
-        # ─── CANCEL ───
+        # --- CANCEL ---
         print("\n--- CANCELLING ORDER (safety cleanup) ---")
         cancel_t0 = _time.time()
         ib.cancelOrder(trade.order)
@@ -165,7 +165,7 @@ async def run(host: str, port: int, client_id: int, account: str):
         print("\n--- EVENTS AFTER CANCEL ---")
         _dump_events_since(cancel_t0)
 
-        # ─── Final state inspection ───
+        # --- Final state inspection ---
         print("\n--- FINAL TRADE STATE ---")
         print(f"    trade_repr: {trade!r}")
         print(f"    orderStatus: {trade.orderStatus!r}")

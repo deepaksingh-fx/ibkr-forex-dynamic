@@ -1,5 +1,5 @@
 """
-whatIf order test — validates the live order placement path WITHOUT executing.
+whatIf order test - validates the live order placement path WITHOUT executing.
 
 IBKR's `order.whatIf = True` flag sends the order to the gateway for margin
 and commission analysis, but the order is NEVER routed to the market. The
@@ -60,7 +60,7 @@ def _has_margin_info(state) -> bool:
     """True iff the orderState carries usable whatIf analysis."""
     if state is None:
         return False
-    # Commission populated → analysis complete.
+    # Commission populated -> analysis complete.
     c = getattr(state, "commission", None)
     if c is not None and not (isinstance(c, float) and c > 1e300):
         return True
@@ -86,7 +86,7 @@ async def whatif_one(ib: IB, contract, account: str, side: str, qty: int) -> dic
     """
     order = MarketOrder(side, qty)
     order.account = account
-    order.whatIf = True              # ← MUST be set before submission
+    order.whatIf = True              # <- MUST be set before submission
     assert_whatif(order)
 
     try:
@@ -160,7 +160,7 @@ async def main() -> int:
     lot_units = args.units
 
     print("=" * 80)
-    print("whatIf order test — NO orders will be placed in the market")
+    print("whatIf order test - NO orders will be placed in the market")
     print(f"  Contract: {SYMBOL} ({lot_units:,} units = {lot_units/100_000:.4f} lot)")
     print(f"  Accounts: {ELIGIBLE_ACCOUNTS}")
     print(f"  Sides:    BUY, SELL  (4 whatIf submissions total)")
@@ -191,7 +191,7 @@ async def main() -> int:
         results = []
         for acct in ELIGIBLE_ACCOUNTS:
             for side in ("BUY", "SELL"):
-                print(f"\n→ whatIf {side} {lot_units:,} {SYMBOL} for {acct} ...")
+                print(f"\n-> whatIf {side} {lot_units:,} {SYMBOL} for {acct} ...")
                 r = await whatif_one(ib, contract, acct, side, lot_units)
                 results.append(r)
                 print(f"   final_status={r.get('final_status')}")
@@ -199,15 +199,15 @@ async def main() -> int:
                     print(f"     log: {entry}")
                 if r.get("ok"):
                     if r.get("commission") is not None:
-                        print(f"   ✓ status={r['status']} "
+                        print(f"   [OK] status={r['status']} "
                               f"commission={r['commission']} {r.get('commissionCurrency','')}")
-                        print(f"     initMargin {r['initMarginBefore']} → {r['initMarginAfter']} "
-                              f"(Δ={r['initMarginChange']})")
-                        print(f"     maintMargin {r['maintMarginBefore']} → {r['maintMarginAfter']} "
-                              f"(Δ={r['maintMarginChange']})")
-                        print(f"     equityWithLoan {r['equityWithLoanBefore']} → {r['equityWithLoanAfter']}")
+                        print(f"     initMargin {r['initMarginBefore']} -> {r['initMarginAfter']} "
+                              f"(delta={r['initMarginChange']})")
+                        print(f"     maintMargin {r['maintMarginBefore']} -> {r['maintMarginAfter']} "
+                              f"(delta={r['maintMarginChange']})")
+                        print(f"     equityWithLoan {r['equityWithLoanBefore']} -> {r['equityWithLoanAfter']}")
                     if r.get("warningText"):
-                        print(f"     ⚠ warning: {r['warningText']}")
+                        print(f"     ! warning: {r['warningText']}")
 
         # Summary
         print("\n" + "=" * 80)
@@ -216,10 +216,10 @@ async def main() -> int:
         ok_count = sum(1 for r in results if r.get("ok"))
         print(f"  {ok_count}/{len(results)} whatIf submissions returned an OrderState")
         print()
-        print(f"{'Account':<12} {'Side':<5} {'Status':<10} {'Commission':<14} {'InitMargin Δ':<14} {'EquityAfter':<14}")
+        print(f"{'Account':<12} {'Side':<5} {'Status':<10} {'Commission':<14} {'InitMargin delta':<14} {'EquityAfter':<14}")
         for r in results:
             if not r.get("ok"):
-                print(f"{r['account']:<12} {r['side']:<5} ✗ {r.get('error','')}")
+                print(f"{r['account']:<12} {r['side']:<5} [X] {r.get('error','')}")
                 continue
             print(f"{r['account']:<12} {r['side']:<5} "
                   f"{str(r.get('status','-')):<10} "

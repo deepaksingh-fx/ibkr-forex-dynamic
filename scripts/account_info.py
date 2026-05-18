@@ -69,7 +69,7 @@ async def dump_account(ib: IB, account: str) -> dict:
     # It's populated by ib.reqAccountUpdates which the gateway runs after connect.
     all_values = ib.accountValues(account=account)
 
-    # Build a dict of tag → list[(value, currency)] from accountValues.
+    # Build a dict of tag -> list[(value, currency)] from accountValues.
     by_tag: dict[str, list] = defaultdict(list)
     for v in all_values:
         by_tag[v.tag].append((v.value, v.currency))
@@ -168,17 +168,17 @@ async def run(host: str, port: int, client_id: int, output_dir: Path):
         cfd_results = []
         for sym in DEFAULT_SYMBOLS:
             r = await try_qualify_cfd(ib, sym)
-            mark = "✓" if r.get("qualified") else "✗"
+            mark = "[OK]" if r.get("qualified") else "[X]"
             log.info(f"  {sym}: {mark}  conId={r.get('conId')}  exchange={r.get('exchange')}  "
                      f"err={r.get('error')}")
             cfd_results.append(r)
     finally:
         ib.disconnect()
 
-    # ───────── CONSOLE DUMP ─────────
+    # --------- CONSOLE DUMP ---------
     print()
     print("=" * 100)
-    print(f"IBKR ACCOUNT INSPECTION — {ny_now().strftime('%a %Y-%m-%d %H:%M %Z')}")
+    print(f"IBKR ACCOUNT INSPECTION - {ny_now().strftime('%a %Y-%m-%d %H:%M %Z')}")
     print(f"Host: {host}:{port}   Client ID: {client_id}   READ-ONLY")
     print("=" * 100)
     print()
@@ -229,7 +229,7 @@ async def run(host: str, port: int, client_id: int, output_dir: Path):
             f"{r.get('error') or ''}"
         )
 
-    # ───────── MARKDOWN FILE ─────────
+    # --------- MARKDOWN FILE ---------
     output_dir.mkdir(parents=True, exist_ok=True)
     md = output_dir / f"account_info_{ny_now().strftime('%Y-%m-%d_%H%M')}.md"
     lines = []
@@ -268,7 +268,7 @@ async def run(host: str, port: int, client_id: int, output_dir: Path):
     lines.append("| Pair | Qualified | conId | Exchange | Local | Trading Class | Error |")
     lines.append("|---|---|---:|---|---|---|---|")
     for r in cfd_results:
-        ok = "✓" if r.get("qualified") else "✗"
+        ok = "[OK]" if r.get("qualified") else "[X]"
         lines.append(
             f"| {r['symbol']} | {ok} | "
             f"{r.get('conId') or ''} | "

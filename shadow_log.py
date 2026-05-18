@@ -34,8 +34,8 @@ class ShadowLog:
     Per-session CSV writers for events and trades.
 
     Files (in `output_dir`):
-      shadow_events_<session_start>.csv     — every strategy event
-      shadow_trades_<session_start>.csv     — closed trades (entry/exit pairs)
+      shadow_events_<session_start>.csv     - every strategy event
+      shadow_trades_<session_start>.csv     - closed trades (entry/exit pairs)
 
     Both files are written incrementally (one row per event), so the CSVs
     are always up-to-date even if the bot is killed.
@@ -83,8 +83,8 @@ class ShadowLog:
         # Assemble trades from entry/exit event pairs.
         self._open: Optional[dict] = None
 
-        logger.info(f"Shadow log: events → {self.events_path}")
-        logger.info(f"Shadow log: trades → {self.trades_path}")
+        logger.info(f"Shadow log: events -> {self.events_path}")
+        logger.info(f"Shadow log: trades -> {self.trades_path}")
 
     def record_event(self, pair: str, event: StrategyEvent,
                      daily_tc: float, daily_bc: float, daily_pivot: float):

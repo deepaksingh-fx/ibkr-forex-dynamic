@@ -2,7 +2,7 @@
 Quick balance check across all FA sub-accounts.
 
 Lists every managed account, fetches NetLiquidation, applies the
-$1000+ filter from SPEC §13.0, and reports which accounts would
+$1000+ filter from SPEC sec13.0, and reports which accounts would
 actually trade.
 """
 from __future__ import annotations
@@ -72,15 +72,15 @@ async def main() -> int:
             elif bal is None:
                 status = "no NetLiquidation found"
             elif bal >= MIN_ACCOUNT_BALANCE_USD:
-                status = f"✅ ELIGIBLE (≥ ${MIN_ACCOUNT_BALANCE_USD:.0f})"
+                status = f"[OK] ELIGIBLE (>= ${MIN_ACCOUNT_BALANCE_USD:.0f})"
                 eligible.append((acct, bal))
             else:
-                status = f"❌ below ${MIN_ACCOUNT_BALANCE_USD:.0f}"
-            bal_str = f"${bal:,.2f}" if bal is not None else "—"
+                status = f"[NO] below ${MIN_ACCOUNT_BALANCE_USD:.0f}"
+            bal_str = f"${bal:,.2f}" if bal is not None else "-"
             print(f"{acct:<14} {bal_str:>14} {ccy:<10} {status:<22}")
 
         print()
-        print(f"Eligible accounts (≥ ${MIN_ACCOUNT_BALANCE_USD:.0f}): {len(eligible)} of {len(rows)}")
+        print(f"Eligible accounts (>= ${MIN_ACCOUNT_BALANCE_USD:.0f}): {len(eligible)} of {len(rows)}")
         if eligible:
             total = sum(b for _, b in eligible)
             print(f"Total tradable balance: ${total:,.2f}")

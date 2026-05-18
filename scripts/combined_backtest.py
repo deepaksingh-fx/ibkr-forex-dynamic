@@ -3,13 +3,13 @@ Combined regime + AdaptiveSuperTrend backtest for one symbol.
 
 Fetches `--days` (default 90) of 5-min bars from IBKR (chunked + deduped),
 buckets them by FX day, then feeds chronologically to BOTH:
-  - RegimeClassifier (regime.py) — uses prior FX day's pivot
-  - AdaptiveSuperTrend (adaptive_supertrend.py) — 6-method auto-select
+  - RegimeClassifier (regime.py) - uses prior FX day's pivot
+  - AdaptiveSuperTrend (adaptive_supertrend.py) - 6-method auto-select
 
 Persisted outputs (written to `--output-dir`, default `backtest_output/`):
-  1. <symbol>_<days>d_regime_transitions.csv  — every regime change
-  2. <symbol>_<days>d_ast_flips.csv             — every active-ST direction flip
-  3. <symbol>_<days>d_summary.md                — human-readable overview
+  1. <symbol>_<days>d_regime_transitions.csv  - every regime change
+  2. <symbol>_<days>d_ast_flips.csv             - every active-ST direction flip
+  3. <symbol>_<days>d_summary.md                - human-readable overview
 
 All timestamps in NY tz, with both ISO 8601 (with offset) and human-readable
 columns (e.g. "Fri 2026-05-15 10:55 EDT"). DST handled automatically.
@@ -93,14 +93,14 @@ async def run(symbol: str, days: int, output_dir: Path,
         now = ny_now()
         start = now - timedelta(days=days + 1)
         log.info(f"Fetching {days}D of 5-min bars for {symbol} "
-                 f"({iso_ny(start)} → {iso_ny(now)})")
+                 f"({iso_ny(start)} -> {iso_ny(now)})")
         bars = await ibkr.fetch_5min_bars_range(symbol, start_ny=start, end_ny=now)
         log.info(f"Got {len(bars)} bars total")
     finally:
         await ibkr.disconnect()
 
     if not bars:
-        print("No bars returned — aborting.")
+        print("No bars returned - aborting.")
         return
 
     buckets = bucket_by_fx_day(bars)
@@ -182,7 +182,7 @@ async def run(symbol: str, days: int, output_dir: Path,
             cur_dir = a_snap.active_dir
             cur_method_idx = a_snap.active_method_idx
             if cur_dir != 0 and prev_active_dir != 0 and cur_dir != prev_active_dir:
-                # True iff the active method changed on this exact bar — then
+                # True iff the active method changed on this exact bar - then
                 # the apparent direction flip is really a method swap, not the
                 # current SuperTrend internally flipping.
                 method_switched = (
@@ -219,7 +219,7 @@ async def run(symbol: str, days: int, output_dir: Path,
             "duration_minutes": duration_bars * 5,
         })
 
-    # ───────── PERSIST ─────────
+    # --------- PERSIST ---------
     output_dir.mkdir(parents=True, exist_ok=True)
     base = f"{symbol}_{days}d"
     regime_csv = output_dir / f"{base}_regime_transitions.csv"
@@ -244,20 +244,20 @@ async def run(symbol: str, days: int, output_dir: Path,
     regime_at_flip_counts = Counter(fl["regime_at_flip"] for fl in ast_flips)
 
     lines = []
-    lines.append(f"# Combined Backtest — {symbol} ({days} days)\n")
+    lines.append(f"# Combined Backtest - {symbol} ({days} days)\n")
     lines.append(f"Generated: {disp_ny(ny_now())}\n")
     lines.append(f"\n## Coverage\n")
     lines.append(f"- Bars classified: **{classified_bars:,}**  (warm-up skipped: {skipped_warmup})")
     lines.append(f"- FX days covered: **{len(fx_days) - 1}**")
     if last_ts is not None:
-        lines.append(f"- Time range: {disp_ny(fx_days[1])} → {disp_ny(last_ts)}")
-    lines.append(f"\n## Regime classifier — segment counts\n")
+        lines.append(f"- Time range: {disp_ny(fx_days[1])} -> {disp_ny(last_ts)}")
+    lines.append(f"\n## Regime classifier - segment counts\n")
     lines.append(f"Total transitions: **{len(regime_transitions)}**\n")
     lines.append("| Regime | Segments |")
     lines.append("|---|---:|")
     for r, n in regime_counts.most_common():
         lines.append(f"| {r} | {n} |")
-    lines.append(f"\n## Adaptive SuperTrend — direction flips\n")
+    lines.append(f"\n## Adaptive SuperTrend - direction flips\n")
     lines.append(f"Total flips: **{len(ast_flips)}**\n")
     lines.append("| Flip | Count |")
     lines.append("|---|---:|")
@@ -278,10 +278,10 @@ async def run(symbol: str, days: int, output_dir: Path,
     lines.append(f"- AST flips: `{flips_csv.name}` ({len(ast_flips)} rows)")
     summary_md.write_text("\n".join(lines) + "\n")
 
-    # ───────── CONSOLE ─────────
+    # --------- CONSOLE ---------
     print()
     print("=" * 100)
-    print(f"COMBINED BACKTEST — {symbol}   {classified_bars:,} classified bars  "
+    print(f"COMBINED BACKTEST - {symbol}   {classified_bars:,} classified bars  "
           f"({len(fx_days) - 1} FX days)")
     print("=" * 100)
     print()

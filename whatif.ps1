@@ -1,4 +1,4 @@
-# whatif.ps1 — Windows wrapper for scripts/whatif.py
+# whatif.ps1 - Windows wrapper for scripts/whatif.py
 #
 # Usage examples:
 #   .\whatif.ps1 -Lot 0.05 -Side SELL

@@ -68,7 +68,7 @@ def test_delete(tmp_path: Path):
     assert store.exists()
     store.delete()
     assert not store.exists()
-    # Idempotent — delete on missing file does not raise.
+    # Idempotent - delete on missing file does not raise.
     store.delete()
 
 

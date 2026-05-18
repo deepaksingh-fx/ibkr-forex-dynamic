@@ -1,7 +1,7 @@
 """
 Live IBKR smoke tests against a running IB Gateway.
 
-GATED by env var RUN_IBKR_LIVE=1 — by default these tests are skipped, since
+GATED by env var RUN_IBKR_LIVE=1 - by default these tests are skipped, since
 they require an actively-connected gateway on the user's machine.
 
 NO ORDERS ARE PLACED. We only:
@@ -33,7 +33,7 @@ if not os.environ.get("RUN_IBKR_LIVE"):
     pytest.skip("Set RUN_IBKR_LIVE=1 to run live IBKR tests", allow_module_level=True)
 
 
-# Lazy import — `ib_async` may not be installed in some environments.
+# Lazy import - `ib_async` may not be installed in some environments.
 ib_async = pytest.importorskip("ib_async")
 from ib_async import IB, Forex, util  # noqa: E402
 
@@ -43,10 +43,10 @@ HOST = os.environ.get("IBKR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("IBKR_PORT", "4001"))
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Fixture: connected, read-only IB client (function-scoped to dodge
 # pytest-asyncio module-scoped event-loop issues).
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 @pytest.fixture
 async def ib():
     client = IB()
@@ -61,9 +61,9 @@ async def ib():
             client.disconnect()
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Connection
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_connection_is_alive(ib):
     assert ib.isConnected() is True
 
@@ -76,9 +76,9 @@ async def test_server_time_round_trip(ib):
     assert delta < 60, f"Server time off by {delta}s"
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # FA: managed accounts
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_managed_accounts_exists(ib):
     accounts = ib.managedAccounts()
     assert isinstance(accounts, list)
@@ -103,9 +103,9 @@ async def test_account_balances_fetchable(ib):
         assert balance >= 0, f"Negative balance for {acct}: {balance}"
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Contracts: qualify all 15 default forex pairs
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_qualify_eurusd(ib):
     contract = Forex("EURUSD")
     qualified = await ib.qualifyContractsAsync(contract)
@@ -132,9 +132,9 @@ async def test_qualify_all_15_default_pairs(ib):
         assert q.currency == sym[3:]
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Historical data: 5-min bars
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_historical_5min_bars_eurusd(ib):
     """Fetch one trading day of 5-min EURUSD bars."""
     contract = (await ib.qualifyContractsAsync(Forex("EURUSD")))[0]
@@ -160,7 +160,7 @@ async def test_historical_5min_bars_eurusd(ib):
     assert b.high >= b.close
     assert b.low <= b.open
     assert b.low <= b.close
-    # EURUSD reasonable bound (it has been ~0.95–1.30 in modern history)
+    # EURUSD reasonable bound (it has been ~0.95-1.30 in modern history)
     assert 0.5 < b.close < 2.0
 
 
@@ -180,9 +180,9 @@ async def test_historical_bars_for_all_pairs(ib):
         assert len(bars) > 0, f"No bars for {sym}"
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Market data subscription (ticks)
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_market_data_subscription(ib):
     """
     Subscribe to EURUSD ticks; receive at least one update; cancel.
@@ -194,7 +194,7 @@ async def test_market_data_subscription(ib):
     from time_utils import is_in_trading_zone, ny_now
 
     if not is_in_trading_zone(ny_now()):
-        pytest.skip("FX market closed (outside Sun 17:00 NY → Fri 17:00 NY); no ticks expected")
+        pytest.skip("FX market closed (outside Sun 17:00 NY -> Fri 17:00 NY); no ticks expected")
 
     contract = (await ib.qualifyContractsAsync(Forex("EURUSD")))[0]
     ticker = ib.reqMktData(contract, "", snapshot=False, regulatorySnapshot=False)
@@ -215,9 +215,9 @@ async def test_market_data_subscription(ib):
         ib.cancelMktData(contract)
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Account-level reqPnL (no positions needed; subscription should establish)
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_account_pnl_subscription(ib):
     accounts = ib.managedAccounts()
     acct = accounts[0]
@@ -230,13 +230,13 @@ async def test_account_pnl_subscription(ib):
         ib.cancelPnL(acct)
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # Safety: read-only enforced
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 async def test_session_is_readonly(ib):
     """ib_async stores the readonly flag on the wrapper; verify it's True."""
     # Some versions store this on ib.client.readonly_; we check what's there.
-    # If neither attribute exists, this test silently passes — but the
+    # If neither attribute exists, this test silently passes - but the
     # connectAsync call enforced readonly=True at the wire level regardless.
     flag = getattr(ib.client, "readonly_", None) or getattr(ib.client, "readonly", None)
     if flag is not None:

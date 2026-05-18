@@ -6,7 +6,7 @@ Process:
   1. Fetch ~35 days of 5-min bars for ALL 15 default forex pairs (chunked).
   2. Identify the last N completed trading FX days (default N=10).
   3. For each backtest FX day:
-       - Look at the PRIOR TRADING FX day's HLC for each pair → compute CPR
+       - Look at the PRIOR TRADING FX day's HLC for each pair -> compute CPR
          width %; the narrowest is the "selected pair" for this FX day.
   4. Run the strategy on EACH pair end-to-end across all fetched bars (so each
      pair's regime + AST indicators stay warm). For each FX day, only the
@@ -17,12 +17,12 @@ Process:
 Output: an Excel workbook + a markdown summary in `--output-dir`.
 
 Sheets:
-  - Daily Summary       — one row per FX day (selected pair + day stats)
-  - Selection Detail    — one row per (FX day, pair) showing width %, TC, BC,
+  - Daily Summary       - one row per FX day (selected pair + day stats)
+  - Selection Detail    - one row per (FX day, pair) showing width %, TC, BC,
                            rank, and selected flag
-  - All Trades          — every trade from selected pairs
-  - All Events          — every event (entry / exit / reverse) on selected days
-  - Headline            — aggregate stats across the backtest window
+  - All Trades          - every trade from selected pairs
+  - All Events          - every event (entry / exit / reverse) on selected days
+  - Headline            - aggregate stats across the backtest window
 
 Usage:
     python scripts/last10days_backtest.py --days 10
@@ -76,10 +76,10 @@ def disp_ny(dt: datetime) -> str:
 def disp_date(dt: datetime) -> str:
     """Display the TRADING-DAY name for an FX-day START anchor.
 
-    Each FX day runs [prior-calendar-day 17:00 NY, today 17:00 NY) — its
+    Each FX day runs [prior-calendar-day 17:00 NY, today 17:00 NY) - its
     START is on the prior calendar day. For human-readable labels we want
     the day the session is named after, which is `start + 1 day`.
-    e.g. fd = Sun 2026-05-03 17:00 NY  →  "Mon 2026-05-04" (Mon's FX day).
+    e.g. fd = Sun 2026-05-03 17:00 NY  ->  "Mon 2026-05-04" (Mon's FX day).
     """
     return (dt + timedelta(days=1)).strftime("%a %Y-%m-%d")
 
@@ -150,7 +150,7 @@ async def run(days: int, output_dir: Path,
         now = ny_now()
         start = now - timedelta(days=fetch_days)
         log.info(f"Fetching {fetch_days}D of 5-min bars for {len(DEFAULT_SYMBOLS)} pairs "
-                 f"(serial — IBKR's ib_async timeout kills parallel fetches)")
+                 f"(serial - IBKR's ib_async timeout kills parallel fetches)")
 
         # Pre-qualify all contracts in parallel (these are tiny requests).
         await ibkr.qualify_many(list(DEFAULT_SYMBOLS))
@@ -163,7 +163,7 @@ async def run(days: int, output_dir: Path,
                 sym, start_ny=start, end_ny=now, pace_sleep_s=0.2,
             )
             pair_bars[sym] = bars
-            log.info(f"  [{i:>2}/{len(DEFAULT_SYMBOLS)}] {sym:<7} → {len(bars):>6} bars  "
+            log.info(f"  [{i:>2}/{len(DEFAULT_SYMBOLS)}] {sym:<7} -> {len(bars):>6} bars  "
                      f"(elapsed {_time.time() - t0:.0f}s)")
         log.info(f"All fetches done in {_time.time() - t0:.1f}s")
     finally:
@@ -208,7 +208,7 @@ async def run(days: int, output_dir: Path,
         # We need a moment inside this FX day to feed prior_trading_fx_day_window.
         sample_now = fd + timedelta(hours=1)
         prior_start, prior_end = prior_trading_fx_day_window(sample_now)
-        # Buckets keyed by FX-day START — prior_start = bucket key for the
+        # Buckets keyed by FX-day START - prior_start = bucket key for the
         # prior trading FX day's HLC.
         pair_widths = []
         for sym in DEFAULT_SYMBOLS:
@@ -222,7 +222,7 @@ async def run(days: int, output_dir: Path,
                 continue
             pair_widths.append((sym, cpr))
         if not pair_widths:
-            log.warning(f"No pairs with CPR available for FX day {disp_date(fd)} — skipping")
+            log.warning(f"No pairs with CPR available for FX day {disp_date(fd)} - skipping")
             continue
         # Tie-break by first appearance in DEFAULT_SYMBOLS.
         order = {s: i for i, s in enumerate(DEFAULT_SYMBOLS)}
@@ -248,7 +248,7 @@ async def run(days: int, output_dir: Path,
 
     log.info("Daily selections:")
     for fd, (sym, w, tc, bc, _) in daily_selection.items():
-        log.info(f"  {disp_date(fd)}  →  {sym}   width={w:.4f}%   TC={tc:.5f}  BC={bc:.5f}")
+        log.info(f"  {disp_date(fd)}  ->  {sym}   width={w:.4f}%   TC={tc:.5f}  BC={bc:.5f}")
 
     # 4. For each selected pair (unique set), run the strategy across all
     #    fetched bars, accumulating events only on the FX days that pair was
@@ -465,16 +465,16 @@ async def run(days: int, output_dir: Path,
     # 8. Console
     print()
     print("=" * 110)
-    print(f"LAST {days} DAYS STRATEGY BACKTEST — multi-pair daily selection")
+    print(f"LAST {days} DAYS STRATEGY BACKTEST - multi-pair daily selection")
     print("=" * 110)
-    print(f"Backtest window: {disp_date(backtest_days[0])} → {disp_date(backtest_days[-1])}")
+    print(f"Backtest window: {disp_date(backtest_days[0])} -> {disp_date(backtest_days[-1])}")
     print(f"Selected pairs:  {dict(Counter(s[0] for s in daily_selection.values()))}")
     print()
     print("Per-day result:")
     for r in daily_summary_rows:
         pl = f"{r['Total Pts']:+.4f}"
-        wr = f"{r['Win Rate %']:.0f}%" if r["Trades"] else " — "
-        print(f"  {r['FX Day']:<22} → {r['Selected Pair']:<6}  "
+        wr = f"{r['Win Rate %']:.0f}%" if r["Trades"] else " - "
+        print(f"  {r['FX Day']:<22} -> {r['Selected Pair']:<6}  "
               f"width={r['Width %']:.4f}%   "
               f"trades={r['Trades']:>3}  win={wr:>5}  pts={pl}")
     print()

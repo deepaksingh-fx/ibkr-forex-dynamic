@@ -1,7 +1,7 @@
 """
 Probe per-account CFD trading permissions using whatIf orders.
 
-A whatIf order is sent to IBKR for margin/commission analysis ONLY — it is
+A whatIf order is sent to IBKR for margin/commission analysis ONLY - it is
 NOT placed in the market. If the account lacks CFD permissions, IBKR
 returns an error that we surface.
 
@@ -61,7 +61,7 @@ async def cfd_whatif_for_account(ib: IB, contract: Contract, account: str,
     else:
         order = MarketOrder(side, units)
     order.account = account
-    order.whatIf = True                      # ★ critical: preview only
+    order.whatIf = True                      # * critical: preview only
     order.tif = "DAY"
     order.outsideRth = True   # so the price is acceptable any hour
 
@@ -84,7 +84,7 @@ async def cfd_whatif_for_account(ib: IB, contract: Contract, account: str,
         # Rejection?
         if os and getattr(os, "status", "") in ("Inactive", "Rejected", "Cancelled", "ApiCancelled"):
             break
-        # Margin populated → success.
+        # Margin populated -> success.
         if oc is not None:
             init_after = getattr(oc, "initMarginAfter", None)
             if init_after not in (None, "", "0", "0.00", "1.7976931348623157E308"):
@@ -92,7 +92,7 @@ async def cfd_whatif_for_account(ib: IB, contract: Contract, account: str,
                 break
         await asyncio.sleep(0.2)
     else:
-        # Loop completed without break → try one final read.
+        # Loop completed without break -> try one final read.
         state = getattr(trade, "orderState", None) or getattr(trade, "state", None)
 
     rejected = (
@@ -101,7 +101,7 @@ async def cfd_whatif_for_account(ib: IB, contract: Contract, account: str,
     err_text = _extract_trade_error(trade)
 
     if rejected or state is None:
-        # Diagnostic dump — for the ambiguous case (no error AND no margin),
+        # Diagnostic dump - for the ambiguous case (no error AND no margin),
         # show the actual trade object so we know where to look next.
         trade_dump = {
             "status": getattr(trade.orderStatus, "status", None),
@@ -167,7 +167,7 @@ async def run(host: str, port: int, client_id: int, symbol: str,
         if not qualified or qualified[0] is None:
             raise RuntimeError(f"Failed to qualify CFD contract for {symbol}")
         contract = qualified[0]
-        log.info(f"CFD contract: {symbol} → secType={contract.secType} "
+        log.info(f"CFD contract: {symbol} -> secType={contract.secType} "
                  f"conId={contract.conId} exchange={contract.exchange} "
                  f"local={contract.localSymbol}")
 
@@ -182,7 +182,7 @@ async def run(host: str, port: int, client_id: int, symbol: str,
             if not r["ok"] and "no margin info returned" in (r.get("error") or ""):
                 # Retry with a LIMIT order far from any plausible market price.
                 limit_px = 1.05 if side == "BUY" else 1.30   # EURUSD bracket
-                log.info(f"  MKT hung — retrying with LIMIT @ {limit_px} for {acct}...")
+                log.info(f"  MKT hung - retrying with LIMIT @ {limit_px} for {acct}...")
                 r_lmt = await cfd_whatif_for_account(
                     ib, contract, acct, side, units,
                     order_type="LMT", limit_price=limit_px,
@@ -196,16 +196,16 @@ async def run(host: str, port: int, client_id: int, symbol: str,
         ib.disconnect()
         log.info("Disconnected")
 
-    # ─── Console report ───
+    # --- Console report ---
     print()
     print("=" * 110)
-    print(f"CFD whatIf PROBE  —  {ny_now().strftime('%a %Y-%m-%d %H:%M %Z')}")
+    print(f"CFD whatIf PROBE  -  {ny_now().strftime('%a %Y-%m-%d %H:%M %Z')}")
     print(f"Contract: {symbol} CFD ({contract.localSymbol}, conId={contract.conId}, exchange={contract.exchange})")
-    print(f"Order: {side} {units:,} units  (whatIf=True — no real order placed)")
+    print(f"Order: {side} {units:,} units  (whatIf=True - no real order placed)")
     print("=" * 110)
     print()
-    print(f"{'Account':<12} {'CFD?':<6} {'InitMargin Δ':>15} {'MaintMargin Δ':>15} "
-          f"{'EquityLoan Δ':>15} {'Commission':>14} {'Warning / Error'}")
+    print(f"{'Account':<12} {'CFD?':<6} {'InitMargin delta':>15} {'MaintMargin delta':>15} "
+          f"{'EquityLoan delta':>15} {'Commission':>14} {'Warning / Error'}")
     print("-" * 110)
     for r in results:
         if r["ok"] and r["state"]:
@@ -214,13 +214,13 @@ async def run(host: str, port: int, client_id: int, symbol: str,
             mm = raw["maintMarginChange"]
             el = raw["equityWithLoanChange"]
             comm = raw["commission"]
-            comm_str = f"{comm} {raw['commissionCurrency']}" if comm not in (None, "", 0) else "—"
+            comm_str = f"{comm} {raw['commissionCurrency']}" if comm not in (None, "", 0) else "-"
             warn = raw["warningText"] or ""
             print(f"{r['account']:<12} {'YES':<6} {str(im):>15} {str(mm):>15} "
                   f"{str(el):>15} {comm_str:>14} {warn}")
         else:
-            print(f"{r['account']:<12} {'NO':<6} {'—':>15} {'—':>15} "
-                  f"{'—':>15} {'—':>14} {r.get('error') or 'unknown'}")
+            print(f"{r['account']:<12} {'NO':<6} {'-':>15} {'-':>15} "
+                  f"{'-':>15} {'-':>14} {r.get('error') or 'unknown'}")
     print()
     print("Full per-account detail:")
     print("-" * 110)
@@ -237,7 +237,7 @@ async def run(host: str, port: int, client_id: int, symbol: str,
                     continue
                 print(f"    {k:<25} {v}")
         else:
-            print(f"    (no state — error: {r.get('error')})")
+            print(f"    (no state - error: {r.get('error')})")
             diag = (r.get("raw") or {}).get("diagnostic")
             if diag:
                 print(f"    diagnostic:")

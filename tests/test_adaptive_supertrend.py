@@ -77,7 +77,7 @@ class TestBarLoop:
     def test_doesnt_crash_on_long_run(self):
         cfg = AdaptiveSTConfig(
             eval_interval_bars=20,
-            perf_lookback_days=1,    # tiny so bars_per_day=288 → 288-bar window
+            perf_lookback_days=1,    # tiny so bars_per_day=288 -> 288-bar window
         )
         ast = AdaptiveSuperTrend(cfg, bars_per_day=288)
         last = None
@@ -94,7 +94,7 @@ class TestBarLoop:
         for ts, o, h, l, c in _bar_stream(n=500):
             snap = ast.update(ts, o, h, l, c)
         # Should have logged trades on most methods by now.
-        # At least ONE method should have ≥ min_trades.
+        # At least ONE method should have >= min_trades.
         assert any(t >= cfg.min_trades for t in snap.method_trade_counts)
 
 
@@ -130,7 +130,7 @@ class TestSignalsRequireFlipPlusFilters:
 class TestLiveTradeStateMachine:
     def test_signal_beats_tsl(self):
         # Construct a contrived scenario where TSL would fire AND a bear signal
-        # also fires — bear signal must win (state flips to short, not flat).
+        # also fires - bear signal must win (state flips to short, not flat).
         cfg = AdaptiveSTConfig(
             enable_auto=False, manual_method="Percentile",
             enable_rsi=False, enable_macd=False,
@@ -140,7 +140,7 @@ class TestLiveTradeStateMachine:
             roc_lookback=3, hyb_smooth=2,
         )
         ast = AdaptiveSuperTrend(cfg, bars_per_day=288)
-        # Just feed bars — the test is that the state machine doesn't get stuck.
+        # Just feed bars - the test is that the state machine doesn't get stuck.
         for ts, o, h, l, c in _bar_stream(n=300, seed=7):
             snap = ast.update(ts, o, h, l, c)
         # Sanity: liveDir is one of {-1, 0, 1}

@@ -60,7 +60,7 @@ async def run(symbols, cfg):
         cur_start, _ = current_fx_day_anchor(now)
         ws, we = prior_trading_fx_day_window(now)
         log.info(f"Current FX day start: {cur_start.isoformat()}")
-        log.info(f"Source window (prior trading FX day): {ws.isoformat()} → {we.isoformat()}")
+        log.info(f"Source window (prior trading FX day): {ws.isoformat()} -> {we.isoformat()}")
 
         cprs = {}
         for sym in symbols:
@@ -71,7 +71,7 @@ async def run(symbols, cfg):
                 continue
             in_win = filter_window(bars, ws, we)
             if not in_win:
-                log.warning(f"{sym}: no bars in window — skipping")
+                log.warning(f"{sym}: no bars in window - skipping")
                 continue
             cprs[sym] = compute_cpr_from_bars(
                 [b.high for b in in_win],
@@ -82,7 +82,7 @@ async def run(symbols, cfg):
         await ibkr.disconnect()
 
     if not cprs:
-        print("No CPRs computed — nothing to rank.")
+        print("No CPRs computed - nothing to rank.")
         return
 
     candidates = [s for s in symbols if s in cprs]
@@ -92,7 +92,7 @@ async def run(symbols, cfg):
     print()
     print("=" * 90)
     print(f"DAILY-NARROWEST CPR PAIR for FX day starting {cur_start.strftime('%a %Y-%m-%d %H:%M %Z')}")
-    print(f"Source window: {ws.strftime('%a %Y-%m-%d %H:%M %Z')} → {we.strftime('%a %Y-%m-%d %H:%M %Z')}")
+    print(f"Source window: {ws.strftime('%a %Y-%m-%d %H:%M %Z')} -> {we.strftime('%a %Y-%m-%d %H:%M %Z')}")
     print("=" * 90)
     wcpr = cprs[winner]
     print(f"  WINNER: {winner}   width_pct={wcpr.width_pct:.4f}%   "

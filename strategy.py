@@ -1,12 +1,12 @@
 """
-forex_cpr_ibkr — integrated live/shadow strategy loop.
+forex_cpr_ibkr - integrated live/shadow strategy loop.
 
-What it does (per session within the Sun 17:00 → Fri 17:00 NY zone):
+What it does (per session within the Sun 17:00 -> Fri 17:00 NY zone):
   1. Bootstrap accounts (balances + the CFD trading account check).
   2. Run daily-narrowest selection (15-pair CPR-width comparison).
   3. For the selected pair:
        a. Fetch `warmup_days` of 5-min bars (chunked, dedup).
-       b. Build the per-FX-day HLC cache → CPR (TC/BC/Pivot) per day.
+       b. Build the per-FX-day HLC cache -> CPR (TC/BC/Pivot) per day.
        c. Instantiate `CPRSuperTrendStrategy` and replay every warmup bar
           chronologically to warm the regime classifier + AdaptiveSuperTrend.
        d. Subscribe to live streaming 5-min bars.
@@ -94,7 +94,7 @@ class Strategy:
         self.state_store = state_store
         self.force_clean_restart = force_clean_restart
 
-        # Per-pair state — torn down and rebuilt on each pair change.
+        # Per-pair state - torn down and rebuilt on each pair change.
         self.current_pair: Optional[str] = None
         self.current_strategy: Optional[CPRSuperTrendStrategy] = None
         self.current_bars_handle = None
@@ -111,7 +111,7 @@ class Strategy:
         self._stop = asyncio.Event()
         self._bar_evt = asyncio.Event()
 
-    # ─────────────────── entry point ───────────────────
+    # ------------------- entry point -------------------
     async def run(self) -> None:
         backoff_s = RECONNECT_BACKOFF_INITIAL_S
         try:
@@ -135,7 +135,7 @@ class Strategy:
 
                     await self._run_session()
                 except StateMismatchError:
-                    # Don't loop on this — the user needs to intervene.
+                    # Don't loop on this - the user needs to intervene.
                     raise
                 except ConnectionLostError as e:
                     logger.warning(f"Connection lost ({e}); reconnecting in {backoff_s:.0f}s")
@@ -173,7 +173,7 @@ class Strategy:
         except asyncio.TimeoutError:
             pass
 
-    # ─────────────────── session = inside-zone segment ───────────────────
+    # ------------------- session = inside-zone segment -------------------
     async def _run_session(self) -> None:
         await self._bootstrap_accounts()
         await self._verify_cfd_account_present()
@@ -198,28 +198,28 @@ class Strategy:
             # FX-day rollover detection.
             cur_fx_day, _ = current_fx_day_anchor(ny_now())
             if last_seen_fx_day is not None and cur_fx_day != last_seen_fx_day:
-                logger.info(f"FX-day rollover detected → {cur_fx_day.isoformat()}")
+                logger.info(f"FX-day rollover detected -> {cur_fx_day.isoformat()}")
                 last_seen_fx_day = cur_fx_day
                 await self._select_and_install_strategy()
             else:
                 last_seen_fx_day = cur_fx_day
 
         await self._teardown_pair()
-        logger.info("Exited trading zone — dropping back to gate")
+        logger.info("Exited trading zone - dropping back to gate")
 
-    # ─────────────────── bootstrap ───────────────────
+    # ------------------- bootstrap -------------------
     async def _bootstrap_accounts(self) -> None:
         if self.balances.has_file():
             self.balances.load()
             logger.info(f"Loaded frozen balances from {self.balances.path}")
         else:
-            logger.info("No balance file — fetching from IBKR (one-time snapshot)")
+            logger.info("No balance file - fetching from IBKR (one-time snapshot)")
             fresh = await self.ibkr.fetch_account_balances_usd()
             self.balances.init_from(fresh)
-            logger.info(f"Wrote frozen balances → {self.balances.path}: {fresh}")
+            logger.info(f"Wrote frozen balances -> {self.balances.path}: {fresh}")
         active = self.balances.active_accounts()
         if not active:
-            logger.warning("No active sub-accounts (none ≥ $1000)")
+            logger.warning("No active sub-accounts (none >= $1000)")
         else:
             logger.info(f"Active accounts ({len(active)}): "
                         + ", ".join(f"{a}=${b:,.2f}" for a, b in active.items()))
@@ -230,14 +230,14 @@ class Strategy:
         if self.config.cfd_account not in managed:
             logger.warning(
                 f"cfd_account={self.config.cfd_account} NOT in managed accounts "
-                f"{managed} — shadow logging will still work, but if you flip "
+                f"{managed} - shadow logging will still work, but if you flip "
                 f"LIVE_TRADING=True orders will fail."
             )
         else:
             logger.info(f"CFD trading account: {self.config.cfd_account}  "
                         f"(LIVE_TRADING={self.config.LIVE_TRADING})")
 
-    # ─────────────────── selection + install strategy ───────────────────
+    # ------------------- selection + install strategy -------------------
     async def _select_and_install_strategy(self) -> None:
         """Pick the daily-narrowest pair and (re)build the strategy if it changed."""
         sel = await self._compute_daily_selection()
@@ -248,9 +248,9 @@ class Strategy:
             logger.info(f"Selected pair unchanged: {winner}  (no rebuild needed)")
             return
 
-        # Pair changed — tear down old + build new.
+        # Pair changed - tear down old + build new.
         if self.current_pair is not None:
-            logger.info(f"Pair change {self.current_pair} → {winner}; tearing down")
+            logger.info(f"Pair change {self.current_pair} -> {winner}; tearing down")
             await self._teardown_pair()
 
         await self._install_strategy_for_pair(winner)
@@ -259,7 +259,7 @@ class Strategy:
         now = ny_now()
         ws, we = prior_trading_fx_day_window(now)
         logger.info(f"Computing daily CPR for {len(self.config.symbols_list)} symbols, "
-                    f"prior trading FX day {ws.isoformat()} → {we.isoformat()}")
+                    f"prior trading FX day {ws.isoformat()} -> {we.isoformat()}")
         cprs = {}
         for sym in self.config.symbols_list:
             try:
@@ -269,7 +269,7 @@ class Strategy:
                 continue
             in_window = self._filter_window(bars, ws, we)
             if not in_window:
-                logger.warning(f"{sym}: no bars in prior-FX-day window — skipping")
+                logger.warning(f"{sym}: no bars in prior-FX-day window - skipping")
                 continue
             try:
                 cprs[sym] = compute_cpr_from_bars(
@@ -280,7 +280,7 @@ class Strategy:
             except Exception:
                 logger.exception(f"{sym}: CPR compute failed; skipping")
         if not cprs:
-            logger.error("No symbols produced a CPR — skipping selection")
+            logger.error("No symbols produced a CPR - skipping selection")
             return None
         candidates = [s for s in self.config.symbols_list if s in cprs]
         try:
@@ -295,18 +295,18 @@ class Strategy:
         )
         return winner, wcpr
 
-    # ─────────────────── state persistence + reconciliation ───────────────────
+    # ------------------- state persistence + reconciliation -------------------
     async def _reconcile_and_restore(self) -> None:
         """
         After install: compare persisted state + IBKR positions and either
         restore the strategy's position or halt on mismatch.
 
         Decision matrix:
-          (A) no state file + IBKR flat                → fresh start, OK
-          (B) no state file + IBKR has position        → halt (unaccounted)
-          (C) state file pos=0 + IBKR flat             → OK
-          (D) state file pos=N + IBKR has matching N   → restore strategy.position
-          (E) state file pos=N + IBKR mismatch         → halt
+          (A) no state file + IBKR flat                -> fresh start, OK
+          (B) no state file + IBKR has position        -> halt (unaccounted)
+          (C) state file pos=0 + IBKR flat             -> OK
+          (D) state file pos=N + IBKR has matching N   -> restore strategy.position
+          (E) state file pos=N + IBKR mismatch         -> halt
         """
         if self.state_store is None or self.current_strategy is None:
             return
@@ -317,6 +317,17 @@ class Strategy:
                     f"--force-clean-restart: deleting state file {self.state_store.path}"
                 )
                 self.state_store.delete()
+            # CRITICAL: reset strategy.position regardless of warmup replay.
+            # Without this, the warmup-replayed virtual position would carry
+            # into live trading.
+            s = self.current_strategy
+            s.position = 0
+            s.entry_price = None
+            s.entry_timestamp = None
+            logger.warning(
+                "--force-clean-restart: strategy state reset to flat. "
+                "Make sure IBKR positions are also flat before this fires!"
+            )
             return
 
         # Fetch IBKR positions for our CFD account.
@@ -339,7 +350,7 @@ class Strategy:
                 logger.exception("Skipping malformed IBKR position row")
 
         # Any CFD position on a pair OTHER than the current selection is a
-        # stranded open trade — halt for safety.
+        # stranded open trade - halt for safety.
         for p in cfd_positions:
             pair = (p.contract.symbol or "") + (p.contract.currency or "")
             if pair != self.current_pair:
@@ -382,13 +393,25 @@ class Strategy:
                 f"--force-clean-restart."
             )
 
-        if ibkr_position == 0:
-            logger.info("Reconciliation OK: both state and IBKR are flat.")
-            return
-
-        # Restore strategy state from persisted.
+        # CRITICAL: ALWAYS overwrite strategy.position from IBKR — never trust
+        # the warmup replay's residual virtual state. The warmup processes
+        # 60 days of historical bars and the strategy state machine "virtually
+        # trades" through them; the final virtual position is meaningless for
+        # real trading. IBKR's real position is the only source of truth.
         s = self.current_strategy
         s.position = ibkr_position
+
+        if ibkr_position == 0:
+            # Reset any virtual entry state that warmup left behind.
+            s.entry_price = None
+            s.entry_timestamp = None
+            logger.info(
+                "Reconciliation OK: both state and IBKR are flat. "
+                "Resetting any warmup-residual virtual position to 0."
+            )
+            return
+
+        # Non-zero matched position: restore entry details from persisted.
         s.entry_price = persisted.entry_price if persisted else None
         if persisted and persisted.entry_timestamp:
             try:
@@ -428,7 +451,7 @@ class Strategy:
         try:
             self.state_store.save(state)
         except Exception:
-            logger.exception("State save failed (continuing — strategy unaffected)")
+            logger.exception("State save failed (continuing - strategy unaffected)")
 
     async def _install_strategy_for_pair(self, symbol: str) -> None:
         """Pre-fetch warmup, build strategy, replay, start streaming."""
@@ -489,7 +512,7 @@ class Strategy:
                 fx_day_start=fxs,
             )
             replayed += 1
-            # During warmup we DO NOT log events — these are historical
+            # During warmup we DO NOT log events - these are historical
             # decisions that have already passed.
             self.last_processed_open_ny = ts_ny
             self.current_fx_day_start = fxs
@@ -502,7 +525,7 @@ class Strategy:
         self.current_force_exit_time = close_t
 
         # Reconcile against IBKR + persisted state BEFORE we start streaming.
-        # If there's a mismatch, raise StateMismatchError — the user must
+        # If there's a mismatch, raise StateMismatchError - the user must
         # intervene before the bot can run.
         await self._reconcile_and_restore()
 
@@ -530,7 +553,7 @@ class Strategy:
         self.last_processed_open_ny = None
         self.current_fx_day_start = None
 
-    # ─────────────────── per-bar processing ───────────────────
+    # ------------------- per-bar processing -------------------
     def _cpr_for_ts(self, ts_ny: datetime):
         """Return CPR for the FX day containing ts_ny, or None if its prior
         trading FX day's HLC is not yet in our cache."""
@@ -574,7 +597,7 @@ class Strategy:
         ts_ny = _bar_ts_ny(bar)
         if (self.last_processed_open_ny is not None
                 and ts_ny <= self.last_processed_open_ny):
-            return   # dedupe — already processed during warmup or earlier event
+            return   # dedupe - already processed during warmup or earlier event
 
         # Update HLC cache for this bar's FX day.
         fxs, _ = current_fx_day_anchor(ts_ny)
@@ -589,7 +612,7 @@ class Strategy:
 
         cpr = self._cpr_for_ts(ts_ny)
         if cpr is None:
-            logger.warning(f"[{symbol}] {ts_ny.isoformat()} no CPR available — skipping bar")
+            logger.warning(f"[{symbol}] {ts_ny.isoformat()} no CPR available - skipping bar")
             self.last_processed_open_ny = ts_ny
             return
 
@@ -615,7 +638,7 @@ class Strategy:
 
         # Per-bar heartbeat: always logs the three entry gates + trade flags.
         # Greppable format: `[BAR] <ts> <asset> close=X | bias=Y regime=Z st=W |
-        # new_trade=... closed=... pos=A→B`.
+        # new_trade=... closed=... pos=A->B`.
         opened_actions = {"ENTRY_LONG", "ENTRY_SHORT",
                           "REVERSE_TO_LONG", "REVERSE_TO_SHORT"}
         closed_actions = {"EXIT_FLIP", "EXIT_EOD"}
@@ -638,10 +661,10 @@ class Strategy:
             f"bias={outcome.bias:<5}  regime={outcome.regime:<18}  st={st_str} "
             f"({outcome.active_method})  |  "
             f"new_trade={new_trade_str}  closed={closed_str}  "
-            f"pos={outcome.position_before:+d}→{outcome.position_after:+d}"
+            f"pos={outcome.position_before:+d}->{outcome.position_after:+d}"
         )
 
-        # Surface events. Use position-delta to pick the order side — this
+        # Surface events. Use position-delta to pick the order side - this
         # handles all 4 transitions (open long/short, close long/short,
         # reversal legs) without depending on active_dir, which is wrong
         # for EXIT_EOD (force-exit doesn't follow an AST flip).
@@ -652,7 +675,7 @@ class Strategy:
                 f"{tag} {symbol}  {ev.action}  @{ev.price:.5f}  "
                 f"bias={ev.bias}  regime={ev.regime}  "
                 f"ast_dir={ev.active_dir} ({ev.active_method})  "
-                f"pos: {running_pos} → {ev.new_position}"
+                f"pos: {running_pos} -> {ev.new_position}"
             )
             if self.shadow_log is not None:
                 self.shadow_log.record_event(symbol, ev, cpr.tc, cpr.bc, cpr.pivot)
@@ -666,7 +689,7 @@ class Strategy:
                 else:
                     logger.error(
                         f"[LIVE] unexpected position delta {delta} on {ev.action} "
-                        f"(prev={running_pos}, new={ev.new_position}) — skipping order"
+                        f"(prev={running_pos}, new={ev.new_position}) - skipping order"
                     )
                     running_pos = ev.new_position
                     continue
@@ -680,7 +703,7 @@ class Strategy:
     async def _fire_live_order(self, symbol: str, ev, side: str) -> None:
         """
         Live-mode order placement. Side is computed by the caller from the
-        position-delta (BUY for +1, SELL for -1). NO whatIf — real orders.
+        position-delta (BUY for +1, SELL for -1). NO whatIf - real orders.
         """
         contract = await self.ibkr.qualify_cfd(symbol)
         from ib_async import MarketOrder
@@ -692,13 +715,13 @@ class Strategy:
             trade = self.ibkr.ib.placeOrder(contract, order)
             logger.warning(
                 f"[LIVE] submitted: {ev.action} {side} {self.config.cfd_units} "
-                f"{symbol} CFD → account {self.config.cfd_account} "
+                f"{symbol} CFD -> account {self.config.cfd_account} "
                 f"orderId={trade.order.orderId}"
             )
         except Exception:
             logger.exception(f"[LIVE] placeOrder raised for {ev.action} {symbol}")
 
-    # ─────────────────── helpers ───────────────────
+    # ------------------- helpers -------------------
     @staticmethod
     def _filter_window(bars, start_ny: datetime, end_ny: datetime):
         out = []

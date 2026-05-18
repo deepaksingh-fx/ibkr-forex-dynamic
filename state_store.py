@@ -8,11 +8,11 @@ Persists the minimum needed to safely resume across restarts:
   - Last processed bar timestamp (for stream dedupe across restarts)
 
 The actual indicator state (Regime + Adaptive SuperTrend internals) is NOT
-persisted — it's rebuilt deterministically by replaying the 60-day warmup
+persisted - it's rebuilt deterministically by replaying the 60-day warmup
 window on every startup. The warmup gives identical state regardless of
 when you start, assuming the same input data.
 
-Atomic write pattern: write to .tmp → fsync → os.replace (POSIX-atomic).
+Atomic write pattern: write to .tmp -> fsync -> os.replace (POSIX-atomic).
 Reads tolerate a missing file but raise on corruption or version mismatch.
 """
 from __future__ import annotations

@@ -8,9 +8,9 @@ import pytest
 from cpr import CPR, compute_cpr_from_bars, compute_cpr_from_hlc
 
 
-# ────────────────────────────────────────────────────────────────────────
-# compute_cpr_from_hlc — math
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
+# compute_cpr_from_hlc - math
+# ------------------------------------------------------------------------
 class TestComputeCPRFromHLC:
     def test_basic_math(self):
         # H=1.1850, L=1.1700, C=1.1800
@@ -29,9 +29,9 @@ class TestComputeCPRFromHLC:
         assert c.tc >= c.bc
 
     def test_force_ordering_when_close_below_bc(self):
-        # When C < (H+L)/2, formula gives TC_raw < BC_raw → must swap.
-        # Pick H=10, L=1, C=2. BC_raw = 5.5. P = 13/3 ≈ 4.333. TC_raw = 8.667 - 5.5 = 3.167.
-        # 3.167 < 5.5 → after swap: TC = 5.5, BC = 3.167.
+        # When C < (H+L)/2, formula gives TC_raw < BC_raw -> must swap.
+        # Pick H=10, L=1, C=2. BC_raw = 5.5. P = 13/3 ~= 4.333. TC_raw = 8.667 - 5.5 = 3.167.
+        # 3.167 < 5.5 -> after swap: TC = 5.5, BC = 3.167.
         c = compute_cpr_from_hlc(10.0, 1.0, 2.0)
         assert c.tc >= c.bc
         assert math.isclose(c.tc, 5.5, rel_tol=1e-6)
@@ -71,9 +71,9 @@ class TestComputeCPRFromHLC:
             c.high = 999  # type: ignore[misc]
 
 
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 # compute_cpr_from_bars
-# ────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------
 class TestComputeCPRFromBars:
     def test_multi_bar_aggregation(self):
         # Source window = 5 bars

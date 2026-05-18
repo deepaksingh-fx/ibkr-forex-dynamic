@@ -7,8 +7,8 @@ feeds chronologically to the regime classifier using the PRIOR FX day's PP
 for each bar (matching the Pine indicator semantics).
 
 Prints two reports:
-  1. Zone-change events — every transition between regimes
-  2. Per-FX-day summary — bar counts per regime
+  1. Zone-change events - every transition between regimes
+  2. Per-FX-day summary - bar counts per regime
 
 No trades. No orders. Read-only.
 
@@ -74,7 +74,7 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
         await ibkr.disconnect()
 
     if not bars:
-        print("No bars returned from IBKR — nothing to backtest.")
+        print("No bars returned from IBKR - nothing to backtest.")
         return
 
     buckets = bucket_by_fx_day(bars)
@@ -96,7 +96,7 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
         day_pp[fd] = cpr.pivot
 
     # Feed bars chronologically; use the PRIOR FX day's PP for each bar.
-    # The first FX day in our window has no prior PP → skip those bars (treated
+    # The first FX day in our window has no prior PP -> skip those bars (treated
     # as additional warm-up).
     classifier = RegimeClassifier(regime_cfg)
     transitions: list = []
@@ -114,12 +114,12 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
             skipped_first_day_bars = len(buckets[fd])
             log.info(
                 f"Skipping first FX day {format_ts(fd)} ({skipped_first_day_bars} bars) "
-                f"— need a prior day for PP."
+                f"- need a prior day for PP."
             )
             continue
         prior_fd = fx_days[i - 1]
         if prior_fd not in day_pp:
-            log.warning(f"No PP available for prior FX day {format_ts(prior_fd)} — skipping {format_ts(fd)}")
+            log.warning(f"No PP available for prior FX day {format_ts(prior_fd)} - skipping {format_ts(fd)}")
             continue
         pp = day_pp[prior_fd]
 
@@ -148,7 +148,7 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
                 transition_start_ts = ts_ny
                 transition_start_snap = {"bar_idx": classified_bars - 1, "last_er": snap.er, "last_cross": snap.crossings}
             else:
-                # Same regime → update "last seen" metrics so end-of-span shows latest.
+                # Same regime -> update "last seen" metrics so end-of-span shows latest.
                 if transition_start_snap is not None:
                     transition_start_snap["last_er"] = snap.er
                     transition_start_snap["last_cross"] = snap.crossings
@@ -175,10 +175,10 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
             "crossings_at_end": transition_start_snap["last_cross"],
         })
 
-    # ───────── Reports ─────────
+    # --------- Reports ---------
     print()
     print("=" * 100)
-    print(f"REGIME BACKTEST — {symbol}   ({classified_bars} classified bars, "
+    print(f"REGIME BACKTEST - {symbol}   ({classified_bars} classified bars, "
           f"skipped {skipped_first_day_bars} warm-up bars from first FX day)")
     print(f"Config: ER len={regime_cfg.er_len} enter={regime_cfg.er_enter} exit={regime_cfg.er_exit} "
           f"| Crossings len={regime_cfg.cross_len} threshold={regime_cfg.cross_threshold}")
@@ -187,7 +187,7 @@ async def run(symbol: str, days: int, cfg: StrategyConfig, regime_cfg: RegimeCon
     print()
     print("ZONE-CHANGE EVENTS")
     print("-" * 100)
-    print(f"{'FROM':<30} {'TO':<30} {'REGIME':<18} {'BARS':>5}  {'ER@end':>8}  {'PP×@end':>8}")
+    print(f"{'FROM':<30} {'TO':<30} {'REGIME':<18} {'BARS':>5}  {'ER@end':>8}  {'PPx@end':>8}")
     print("-" * 100)
     for t in transitions:
         er_str = f"{t['er_at_end']:.3f}" if t['er_at_end'] is not None else "  n/a "
@@ -224,7 +224,7 @@ def main():
     p = argparse.ArgumentParser(description="Historical regime backtest for one symbol")
     p.add_argument("--symbol", default="CHFJPY")
     p.add_argument("--days", type=int, default=8,
-                   help="Days of 5-min history to fetch (default 8 — gives 6-7 classifiable FX days)")
+                   help="Days of 5-min history to fetch (default 8 - gives 6-7 classifiable FX days)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=4001)
     p.add_argument("--client-id", type=int, default=53)

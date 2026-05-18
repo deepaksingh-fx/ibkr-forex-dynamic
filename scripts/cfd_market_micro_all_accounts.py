@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ib_async import IB, Contract, MarketOrder  # type: ignore[import-untyped]
 
 
-# ───── event capture (keyed by orderId so each account's events are isolated) ─────
+# ----- event capture (keyed by orderId so each account's events are isolated) -----
 EVENTS_BY_ORDER: dict[int, list[dict]] = {}
 ERRORS_BY_REQ: dict[int, list[dict]] = {}
 
@@ -93,7 +93,7 @@ async def place_for_account(ib: IB, contract: Contract, account: str,
     try:
         order = MarketOrder("BUY", units)
         order.account = account
-        order.whatIf = False              # ★ REAL order
+        order.whatIf = False              # * REAL order
         order.tif = "DAY"
         order.outsideRth = False
         order.transmit = True
@@ -165,9 +165,9 @@ async def run(host: str, port: int, client_id: int, units: int, symbol: str):
         ib.disconnect()
         log.info("Disconnected")
 
-    # ─── REPORTS ───
+    # --- REPORTS ---
     print("\n" + "=" * 110)
-    print(f"PER-ACCOUNT OUTCOME — {symbol} CFD MarketOrder BUY {units} units (0.01 lot)")
+    print(f"PER-ACCOUNT OUTCOME - {symbol} CFD MarketOrder BUY {units} units (0.01 lot)")
     print("=" * 110)
     print(f"{'Account':<12} {'orderId':>8} {'permId':>14} {'status':<14} "
           f"{'filled':>7} {'avg_fill':>10}  errors")
@@ -175,16 +175,16 @@ async def run(host: str, port: int, client_id: int, units: int, symbol: str):
     for r in results:
         errs = ", ".join(f"{e.get('errorCode')}:{(e.get('errorString') or '')[:40]}" for e in r["errors"])
         print(f"{r['account']:<12} {str(r['orderId'] or ''):>8} {str(r['permId'] or ''):>14} "
-              f"{str(r['final_status'] or '—'):<14} "
+              f"{str(r['final_status'] or '-'):<14} "
               f"{r['filled']:>7.1f} {r['avg_fill_price']:>10.5f}  "
-              f"{errs or '—'}")
+              f"{errs or '-'}")
 
     print()
     print("=" * 110)
     print("FULL PER-ACCOUNT DETAIL (raw)")
     print("=" * 110)
     for r in results:
-        print(f"\n────── {r['account']} ──────")
+        print(f"\n------ {r['account']} ------")
         if r["exception"]:
             print(f"  PYTHON EXCEPTION: {r['exception']}")
             continue
