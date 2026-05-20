@@ -482,10 +482,13 @@ class Strategy:
                                         float(b.close))
         logger.info(f"[install] HLC cache covers {len(self.fx_day_hlc)} FX days")
 
-        # Build the strategy with default Regime + AST configs.
+        # Build the strategy with default Regime + classic-SuperTrend AST.
+        # Classic = TradingView-style SuperTrend: ATR(base_atr) + base_mult, no
+        # auto method selection. Other AST methods still compute in parallel
+        # but only "Classic" drives signals.
         strategy = CPRSuperTrendStrategy(
             regime_cfg=RegimeConfig(),
-            ast_cfg=AdaptiveSTConfig(),
+            ast_cfg=AdaptiveSTConfig(enable_auto=False, manual_method="Classic"),
             force_exit_close_time=close_t,
             ast_bars_per_day=288,
         )

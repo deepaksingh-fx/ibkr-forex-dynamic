@@ -105,11 +105,11 @@ def main() -> int:
 
     if cfg.LIVE_TRADING:
         log.warning("=" * 60)
-        log.warning("LIVE_TRADING enabled - socket is NOT read-only.")
-        log.warning("(This build does not place orders regardless.)")
+        log.warning("LIVE TRADING IS ENABLED - REAL CFD ORDERS WILL BE PLACED.")
+        log.warning(f"Account: {cfg.cfd_account}  Units per order: {cfg.cfd_units}")
         log.warning("=" * 60)
     else:
-        log.info("Dry-run mode (read-only socket; no orders placed)")
+        log.info("SHADOW mode (read-only socket; no orders placed - decisions logged only)")
 
     log.info(
         f"Config: symbols={len(cfg.symbols_list)} pairs "

@@ -49,8 +49,9 @@ from indicators import (
 
 
 METHOD_NAMES = ["Percentile", "Regime", "Z-Score", "Dynamic Period",
-                "Rate of Change", "Hybrid"]
+                "Rate of Change", "Hybrid", "Classic"]
 METHOD_INDEX = {n: i for i, n in enumerate(METHOD_NAMES)}
+NUM_METHODS = len(METHOD_NAMES)
 
 
 # --- Config -------------------------------------------------------------
@@ -285,9 +286,9 @@ class AdaptiveSuperTrend:
         self.macd = MACD(config.macd_fast, config.macd_slow, config.macd_signal)
 
         # Per-method state + trade simulators
-        self.states: list[_MethodState] = [_MethodState() for _ in range(6)]
+        self.states: list[_MethodState] = [_MethodState() for _ in range(NUM_METHODS)]
         self.trades: list[_TradeSimulator] = [
-            _TradeSimulator(self.perf_lookback_bars) for _ in range(6)
+            _TradeSimulator(self.perf_lookback_bars) for _ in range(NUM_METHODS)
         ]
 
         # Active method
@@ -330,6 +331,7 @@ class AdaptiveSuperTrend:
 
     def _method_atr(self, idx: int, atr_base: Optional[float], dyn_atr: Optional[float]) -> Optional[float]:
         return dyn_atr if idx == 3 else atr_base
+        # idx 6 ("Classic") -> atr_base, mult = base_mult: standard SuperTrend.
 
     # ------------------------- main update -------------------------
     def update(self, timestamp: datetime, open_: float, high: float,
@@ -350,8 +352,9 @@ class AdaptiveSuperTrend:
         dyn_atr = self._update_dyn_atr(tr_val, dyn_period)
 
         # 3. Per-method multipliers.
-        method_mults: list[Optional[float]] = [None] * 6
+        method_mults: list[Optional[float]] = [None] * NUM_METHODS
         method_mults[3] = cfg.base_mult     # dynamic period uses base mult
+        method_mults[6] = cfg.base_mult     # classic SuperTrend: ATR(base_atr) + base_mult
 
         # Percentile method (0)
         pctl_rank_val = self.pctl_rank.update(atr_base) if atr_base is not None else None
@@ -403,8 +406,8 @@ class AdaptiveSuperTrend:
         hl2 = (high + low) / 2.0
         prev_close = self.prev_close if self.prev_close is not None else close
 
-        flips: list[bool] = [False] * 6
-        for i in range(6):
+        flips: list[bool] = [False] * NUM_METHODS
+        for i in range(NUM_METHODS):
             mult = method_mults[i]
             atr_i = self._method_atr(i, atr_base, dyn_atr)
             if mult is None or atr_i is None:
@@ -449,11 +452,11 @@ class AdaptiveSuperTrend:
             self.trades[i].prune(bi - self.perf_lookback_bars)
 
         # 5. Auto-selection.
-        method_scores = [self._method_score(i) for i in range(6)]
+        method_scores = [self._method_score(i) for i in range(NUM_METHODS)]
         if cfg.enable_auto and (bi % max(1, cfg.eval_interval_bars) == 0):
             best_idx = 0
             best_score = -float("inf")
-            for k in range(6):
+            for k in range(NUM_METHODS):
                 if method_scores[k] > best_score:
                     best_score = method_scores[k]
                     best_idx = k

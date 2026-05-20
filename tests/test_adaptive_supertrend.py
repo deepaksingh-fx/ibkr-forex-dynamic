@@ -85,7 +85,7 @@ class TestBarLoop:
             last = ast.update(ts, o, h, l, c)
         assert isinstance(last, AdaptiveSnapshot)
         assert last.bar_index == 599
-        assert last.active_method_idx in range(6)
+        assert last.active_method_idx in range(7)
         assert last.active_method_name in METHOD_NAMES
 
     def test_active_method_settles_into_something(self):
