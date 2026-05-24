@@ -1,6 +1,7 @@
 # Runtime / sensitive
 account_balances.json
 strategy_state.json
+pivot_strategy_state.json
 *.log
 live.log
 dryrun.log
