@@ -53,6 +53,12 @@ class StateMismatchError(RuntimeError):
 RECONNECT_BACKOFF_INITIAL_S = 5.0
 RECONNECT_BACKOFF_MAX_S = 60.0
 
+# After a 5-min bar closes on the stream, wait this long then re-fetch it from
+# historical data so the decision uses the SETTLED OHLC rather than the
+# provisional real-time bar (whose intrabar high/low can differ in thin
+# liquidity and flip threshold-sensitive filters like ADX at its border).
+SETTLE_REFETCH_DELAY_S = 3.0
+
 
 def _bar_ts_ny(bar) -> datetime:
     ts = bar.date
@@ -484,6 +490,22 @@ class PivotRuntime:
             asyncio.create_task(self._on_closed_bar(symbol, closed))
         return handler
 
+    async def _settled_bar(self, symbol: str, ts_ny: datetime):
+        """Re-fetch the just-closed 5-min bar from historical data so the
+        decision uses settled OHLC instead of the provisional streamed bar.
+        Returns the matching settled bar, or None if it can't be found."""
+        try:
+            await asyncio.sleep(SETTLE_REFETCH_DELAY_S)
+            bars = await self.ibkr.fetch_5min_bars(
+                symbol, end_ny=ny_now(), duration_str="1 D")
+        except Exception:
+            logger.exception(f"[{symbol}] settled-bar re-fetch failed")
+            return None
+        for b in bars:
+            if _bar_ts_ny(b) == ts_ny:
+                return b
+        return None
+
     async def _on_closed_bar(self, symbol: str, bar) -> None:
         try:
             await self._on_closed_bar_impl(symbol, bar)
@@ -497,6 +519,25 @@ class PivotRuntime:
         if (self.last_processed_open_ny is not None
                 and ts_ny <= self.last_processed_open_ny):
             return
+
+        # Decide on the SETTLED bar, not the provisional streamed one.
+        settled = await self._settled_bar(symbol, ts_ny)
+        if settled is not None:
+            if (abs(float(settled.high) - float(bar.high)) > 1e-9
+                    or abs(float(settled.low) - float(bar.low)) > 1e-9
+                    or abs(float(settled.close) - float(bar.close)) > 1e-9):
+                logger.info(
+                    f"[{symbol}] {ts_ny.isoformat()} settled bar differs from stream: "
+                    f"H/L/C stream={float(bar.high):.5f}/{float(bar.low):.5f}/{float(bar.close):.5f} "
+                    f"-> settled={float(settled.high):.5f}/{float(settled.low):.5f}/{float(settled.close):.5f} "
+                    f"(deciding on settled)"
+                )
+            bar = settled
+        else:
+            logger.warning(
+                f"[{symbol}] {ts_ny.isoformat()} settled bar unavailable - "
+                f"deciding on streamed bar (may be provisional)"
+            )
 
         fxs, _ = current_fx_day_anchor(ts_ny)
         cur = self.fx_day_hlc.get(fxs)
@@ -535,10 +576,13 @@ class PivotRuntime:
         closes = [e for e in outcome.events if e.action in closed_actions]
         base_str = (f"{outcome.base_level_name}@{outcome.base_level:.5f}"
                     if outcome.base_level is not None else "none")
+        adx_str = f"{outcome.adx:.1f}" if outcome.adx is not None else "-"
+        ema_str = f"{outcome.ema_fast:.5f}" if outcome.ema_fast is not None else "-"
         logger.info(
             f"[BAR] {ts_ny.strftime('%a %m-%d %H:%M')}  asset={symbol}  "
-            f"close={outcome.close:.5f}  |  base={base_str}  bias={outcome.bias:<5} "
-            f"st={outcome.st_state:<5}(dir={outcome.st_dir:+d})  |  "
+            f"H/L/C={float(bar.high):.5f}/{float(bar.low):.5f}/{outcome.close:.5f}  |  "
+            f"base={base_str}  bias={outcome.bias:<5} "
+            f"st={outcome.st_state:<5}(dir={outcome.st_dir:+d})  adx={adx_str}  ema50={ema_str}  |  "
             f"new_trade={'YES(' + opens[0].action + ')' if opens else 'no'}  "
             f"closed={'YES(' + closes[0].action + ')' if closes else 'no'}  "
             f"pos={outcome.position_before:+d}->{outcome.position_after:+d}"

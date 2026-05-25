@@ -82,6 +82,10 @@ class PivotBarOutcome:
     position_before: int
     position_after: int
     events: list[PivotEvent]
+    # Raw filter values for the bar (for live observability / debugging).
+    adx: Optional[float] = None
+    ema_fast: Optional[float] = None
+    supertrend: Optional[float] = None
 
 
 class PivotSuperTrendStrategy:
@@ -204,6 +208,7 @@ class PivotSuperTrendStrategy:
             flipped_this_bar=flipped, is_first_candle=is_first_candle,
             position_before=position_before, position_after=self.position,
             events=events,
+            adx=snap.adx, ema_fast=snap.ema_fast, supertrend=snap.supertrend,
         )
 
     # ------------------------------------------------------------------ helpers
