@@ -102,6 +102,15 @@ class PivotRuntime:
         self._stop = asyncio.Event()
         self._bar_evt = asyncio.Event()
 
+        # --- data-health gating ---
+        # Names of IBKR market/historical data farms currently reported broken.
+        # While non-empty (or connectivity is lost), bar decisions are paused;
+        # on recovery the strategy is re-warmed so corrupted bars never seed the
+        # recursive indicators (ADX/EMA/SuperTrend).
+        self._broken_farms: set[str] = set()
+        self._rewarm_needed: bool = False
+        self._error_handler_attached: bool = False
+
     # ------------------- entry point -------------------
     async def run(self) -> None:
         backoff_s = RECONNECT_BACKOFF_INITIAL_S
@@ -111,6 +120,7 @@ class PivotRuntime:
                     if not self.ibkr.is_connected:
                         logger.info("Connecting to IBKR...")
                         await self.ibkr.connect()
+                        self._attach_error_handler()
                         backoff_s = RECONNECT_BACKOFF_INITIAL_S
 
                     while (not is_in_trading_zone(ny_now())
@@ -178,6 +188,8 @@ class PivotRuntime:
             except asyncio.TimeoutError:
                 pass
             self._bar_evt.clear()
+            # Re-warm if a data-farm outage happened and data is now healthy.
+            await self._maybe_rewarm()
             cur_fx_day, _ = current_fx_day_anchor(ny_now())
             if last_seen_fx_day is not None and cur_fx_day != last_seen_fx_day:
                 logger.info(f"FX-day rollover detected -> {cur_fx_day.isoformat()}")
@@ -490,6 +502,74 @@ class PivotRuntime:
             asyncio.create_task(self._on_closed_bar(symbol, closed))
         return handler
 
+    # ------------------- data-health gating -------------------
+    # IBKR error/status codes (delivered via errorEvent) we react to.
+    _FARM_BROKEN_CODES = {2103, 2105}        # market-data / historical-data farm broken
+    _FARM_OK_CODES = {2104, 2106}            # corresponding farm restored
+    _CONN_LOST_CODES = {1100}                # full TWS<->IBKR connectivity lost
+    _CONN_RESTORED_LOST_DATA = {1101}        # restored, data lost -> must re-warm
+    _CONN_RESTORED_OK = {1102}               # restored, data maintained
+
+    _CONN_SENTINEL = "__connectivity__"
+
+    def _attach_error_handler(self) -> None:
+        if self._error_handler_attached:
+            return
+        try:
+            self.ibkr.ib.errorEvent += self._on_ib_error
+            self._error_handler_attached = True
+        except Exception:
+            logger.exception("Failed to attach errorEvent handler (data-health gating disabled)")
+
+    @staticmethod
+    def _farm_name(msg: str) -> str:
+        # Messages look like "...connection is broken:usfarm" / "...is OK:cashhmds".
+        return msg.rsplit(":", 1)[-1].strip() if ":" in msg else msg.strip()
+
+    def _on_ib_error(self, reqId=None, errorCode=None, errorString="", contract=None, *extra) -> None:
+        try:
+            errorString = errorString or ""
+            was_healthy = self.data_healthy
+            if errorCode in self._FARM_BROKEN_CODES:
+                self._broken_farms.add(self._farm_name(errorString))
+            elif errorCode in self._FARM_OK_CODES:
+                self._broken_farms.discard(self._farm_name(errorString))
+            elif errorCode in self._CONN_LOST_CODES:
+                self._broken_farms.add(self._CONN_SENTINEL)
+            elif errorCode in self._CONN_RESTORED_LOST_DATA:
+                self._broken_farms.discard(self._CONN_SENTINEL)
+                self._rewarm_needed = True        # data was lost; rebuild for sure
+            elif errorCode in self._CONN_RESTORED_OK:
+                self._broken_farms.discard(self._CONN_SENTINEL)
+            else:
+                return  # not a health-relevant code
+
+            if was_healthy and not self.data_healthy:
+                logger.warning(f"[DATA] unhealthy - pausing decisions (broken: {self._broken_farms})")
+            elif not was_healthy and self.data_healthy:
+                # Recovered from an outage during the session -> re-warm on clean data.
+                self._rewarm_needed = True
+                self._bar_evt.set()               # wake the session loop promptly
+                logger.warning("[DATA] restored - will re-warm strategy on clean data")
+        except Exception:
+            logger.exception("error in _on_ib_error handler")
+
+    @property
+    def data_healthy(self) -> bool:
+        return not self._broken_farms
+
+    async def _maybe_rewarm(self) -> None:
+        """If a data outage occurred during the session, rebuild the strategy on
+        fresh historical bars once data is healthy again."""
+        if not self._rewarm_needed or not self.data_healthy:
+            return
+        self._rewarm_needed = False
+        if self.current_pair is None:
+            return
+        logger.warning("[DATA] re-warming after data outage (rebuilding indicators on clean data)")
+        await self._teardown_pair()       # clears current_pair -> forces a rebuild
+        await self._select_and_install_strategy()
+
     async def _settled_bar(self, symbol: str, ts_ny: datetime):
         """Re-fetch the just-closed 5-min bar from historical data so the
         decision uses settled OHLC instead of the provisional streamed bar.
@@ -518,6 +598,16 @@ class PivotRuntime:
         ts_ny = _bar_ts_ny(bar)
         if (self.last_processed_open_ny is not None
                 and ts_ny <= self.last_processed_open_ny):
+            return
+
+        # Data-health gate: never decide/trade on a bar while an IBKR data farm
+        # is broken - the OHLC may be incomplete/provisional. We skip without
+        # advancing last_processed; the post-recovery re-warm rebuilds cleanly.
+        if not self.data_healthy:
+            logger.warning(
+                f"[{symbol}] {ts_ny.isoformat()} data unhealthy "
+                f"(broken: {self._broken_farms}); skipping bar - no decision/order"
+            )
             return
 
         # Decide on the SETTLED bar, not the provisional streamed one.
