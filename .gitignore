@@ -33,3 +33,8 @@ env/
 # Local overrides
 .env
 .env.local
+
+# coil strategy generated artifacts
+coil_trades_*.xlsx
+coil_bt_cache_*.json
+~$*.xlsx

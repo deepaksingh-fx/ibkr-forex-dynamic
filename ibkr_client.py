@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ib_async import IB, BarDataList, Contract, Forex, MarketOrder, OrderStatus   # type: ignore[import-untyped]  # noqa: F401
+from ib_async import IB, BarDataList, Contract, Forex, MarketOrder, OrderStatus, StopOrder   # type: ignore[import-untyped]  # noqa: F401
 
 from config import StrategyConfig
 
@@ -476,3 +476,128 @@ class IBKRClient:
             if code or msg:
                 return f"code={code} msg={msg[:240]}"
         return "no error message in trade.log"
+
+    # ============== CFD order management for the coil strategy ==============
+    # All of these are GATED by LIVE_TRADING: in shadow they log intent and place
+    # nothing. The coil strategy needs a resting STOP and the ability to move it
+    # to breakeven / cancel it - capabilities the old market-only path lacked.
+
+    async def place_cfd_market(
+        self,
+        symbol: str,
+        side: str,                 # "BUY" | "SELL"
+        units: int,
+        account: str,
+        timeout_s: float = ORDER_FILL_TIMEOUT_S,
+    ) -> Dict[str, Any]:
+        """
+        Market order on the CFD contract (SMART), WAIT for fill. Returns the same
+        dict shape as place_market_order (status/fill_price/fill_qty/trade). The
+        fill price is required to anchor the protective stop, so unlike the old
+        fire-and-forget path this one waits.
+        """
+        if side not in ("BUY", "SELL"):
+            raise ValueError(f"side must be BUY|SELL, got {side!r}")
+        intent = {"account": account, "symbol": symbol, "side": side, "units": units, "kind": "CFD_MKT"}
+        empty = {"fill_price": None, "fill_qty": None, "error": None, "trade": None}
+        if not self.config.LIVE_TRADING:
+            logger.info(f"[SHADOW] CFD market: {intent}")
+            return {"status": "dry_run", "intent": intent, **empty}
+
+        contract = await self.qualify_cfd(symbol)
+        order = MarketOrder(side, units)
+        order.account = account
+        order.tif = "DAY"
+        order.whatIf = False
+        try:
+            trade = self.ib.placeOrder(contract, order)
+            logger.info(f"[LIVE] CFD market submitted: {intent}")
+        except Exception as e:
+            logger.exception(f"placeOrder (CFD market) failed: {intent}")
+            return {"status": "rejected", "intent": intent, **{**empty, "error": str(e)}}
+
+        final = await self._wait_for_terminal_status(trade, timeout_s)
+        if final == "Filled":
+            avg = getattr(trade.orderStatus, "avgFillPrice", None) or None
+            qty = getattr(trade.orderStatus, "filled", 0) or 0
+            fill_price = float(avg) if avg else None
+            logger.info(f"[LIVE] CFD FILLED: {intent} avg={fill_price} qty={qty}")
+            return {"status": "filled", "intent": intent, "fill_price": fill_price,
+                    "fill_qty": int(qty), "error": None, "trade": trade}
+        reason = self._extract_rejection_reason(trade)
+        logger.error(f"[LIVE] CFD market not filled ({final}): {intent} {reason}")
+        return {"status": "timeout" if final == "Timeout" else "rejected",
+                "intent": intent, **{**empty, "error": f"{final}; {reason}", "trade": trade}}
+
+    async def place_cfd_stop(
+        self,
+        symbol: str,
+        side: str,                 # CLOSING side: "SELL" protects a long, "BUY" protects a short
+        units: int,
+        stop_price: float,
+        account: str,
+    ):
+        """
+        Resting STOP-MARKET on the CFD that protects an open position. Returns the
+        ib_async Trade (live) or a dry-run dict (shadow). tif=GTC so it rests until
+        we cancel it (session end / reversal) or it triggers.
+        """
+        if side not in ("BUY", "SELL"):
+            raise ValueError(f"side must be BUY|SELL, got {side!r}")
+        intent = {"account": account, "symbol": symbol, "side": side, "units": units,
+                  "stop": stop_price, "kind": "CFD_STOP"}
+        if not self.config.LIVE_TRADING:
+            logger.info(f"[SHADOW] CFD stop: {intent}")
+            return {"status": "dry_run", "intent": intent}
+
+        contract = await self.qualify_cfd(symbol)
+        order = StopOrder(side, units, stop_price)
+        order.account = account
+        order.tif = "GTC"
+        order.whatIf = False
+        trade = self.ib.placeOrder(contract, order)
+        logger.info(f"[LIVE] CFD stop placed: {intent}")
+        return trade
+
+    def modify_stop(self, trade, new_stop_price: float) -> None:
+        """Move a resting stop (e.g. to breakeven). Re-places the SAME order id
+        with a new trigger price = modify-in-place."""
+        if not self.config.LIVE_TRADING or not hasattr(trade, "order"):
+            logger.info(f"[SHADOW] modify stop -> {new_stop_price}")
+            return
+        order = trade.order
+        order.auxPrice = new_stop_price
+        self.ib.placeOrder(trade.contract, order)
+        logger.info(f"[LIVE] stop modified -> {new_stop_price}")
+
+    def cancel_order(self, trade) -> None:
+        """Cancel a resting order (the protective stop on reversal / session end)."""
+        if not self.config.LIVE_TRADING or not hasattr(trade, "order"):
+            logger.info("[SHADOW] cancel order")
+            return
+        try:
+            self.ib.cancelOrder(trade.order)
+            logger.info("[LIVE] order cancelled")
+        except Exception:
+            logger.exception("cancelOrder failed")
+
+    # ------------------------- live monitoring (spot ticks + PnL) -------------------------
+    async def subscribe_spot_quote(self, symbol: str):
+        """Live streaming quote on the IDEALPRO SPOT contract (the breakeven
+        watcher's price source; the CFD serves no market data). Returns a Ticker;
+        read ticker.bid/ask/midpoint() or attach ticker.updateEvent."""
+        contract = await self.qualify_forex(symbol)
+        self.ib.reqMarketDataType(1)            # live
+        return self.ib.reqMktData(contract, "", False, False)
+
+    async def cancel_spot_quote(self, symbol: str) -> None:
+        try:
+            contract = await self.qualify_forex(symbol)
+            self.ib.cancelMktData(contract)
+        except Exception:
+            logger.exception("cancelMktData failed")
+
+    def subscribe_account_pnl(self, account: str):
+        """Live account PnL stream (authoritative USD for the daily-loss limit).
+        Returns a PnL object whose .dailyPnL/.realizedPnL update in place."""
+        return self.ib.reqPnL(account)

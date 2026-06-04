@@ -35,6 +35,12 @@ class CPR:
         # Pivot is always > 0 for forex (no zero-priced pairs).
         return (self.width / self.pivot) * 100.0
 
+    @property
+    def width_pct_tc(self) -> float:
+        # (TC - BC) / TC x 100. Used by the session/coil selection strategy.
+        # TC is always >= BC and > 0 for forex, so the denominator is safe.
+        return (self.width / self.tc) * 100.0
+
 
 def compute_cpr_from_hlc(high: float, low: float, close: float) -> CPR:
     """Compute CPR from a window's H, L, C. Force TC >= BC."""
