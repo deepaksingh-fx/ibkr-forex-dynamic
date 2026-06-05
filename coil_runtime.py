@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
-from coil_orders import CoilOrderManager
+from coil_orders import CoilOrderManager, OpenTrade
 from coil_selection import CoilParams, compute_pair_coil, coil_select
 from coil_strategy import CoilBase, entry_dir, reverse_signal
 from config import StrategyConfig
@@ -28,7 +28,7 @@ from ibkr_client import IBKRClient
 from pivots import compute_pivots
 from quality_supertrend import DMI
 from selection import SelectionError
-from sessions import IST, Session, SESSIONS, first_candle_close, session_window
+from sessions import IST, Session, SESSIONS, active_session, first_candle_close, session_window
 from time_utils import NY, ny_now, prior_trading_fx_day_window, to_ny
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,16 @@ class CoilRuntime:
         logger.info(f"[coil] {mode} runtime up. units={self.config.cfd_units} "
                     f"risk=${self.risk} BE=${self.breakeven} dailyLimit=${self.daily_limit}")
         try:
+            # Restart recovery: if IBKR shows an open position, resume managing it.
+            rec = await self._recover()
+            if rec is not None:
+                session, sdate, trade = rec
+                self._done.add((session.name, sdate.isoformat()))
+                try:
+                    await self._trade_session(session, sdate, recovered=trade)
+                except Exception:
+                    logger.exception("[coil] recovered session crashed")
+
             while not self._stop.is_set():
                 now_ist = ny_now().astimezone(IST)
                 active = self._active(now_ist)
@@ -118,35 +128,47 @@ class CoilRuntime:
         return daily <= -self.daily_limit
 
     # --------------------------- one session ---------------------------
-    async def _trade_session(self, session: Session, sdate) -> None:
-        if self._halt_fx_day and self._fx_day_key() == self._halt_fx_day:
+    async def _trade_session(self, session: Session, sdate, recovered: Optional[OpenTrade] = None) -> None:
+        if recovered is None and self._halt_fx_day and self._fx_day_key() == self._halt_fx_day:
             logger.info(f"[coil] {session.name}: halted for the day (daily limit)")
             return
-        winner = await self._select(session, sdate)
+        winner = recovered.symbol if recovered else await self._select(session, sdate)
         if winner is None:
             return
-        logger.info(f"[coil] {session.name} selected {winner}")
+        logger.info(f"[coil] {session.name} {'RESUME' if recovered else 'selected'} {winner}")
 
         start_ist, end_ist = session_window(session, sdate)
-        end_ny = end_ist.astimezone(NY)
+        start_ny, end_ny = start_ist.astimezone(NY), end_ist.astimezone(NY)
         anchor_ny = first_candle_close(session, sdate).astimezone(NY)
         noentry_ny = end_ny - timedelta(minutes=self.params.no_entry_last_minutes)
+        now_ny = ny_now().astimezone(NY)
+        upto = min(now_ny, end_ny)
 
-        # warm-up + pivots + sizing
+        # warm-up + pivots + sizing. Bars run up to NOW and the session-so-far is
+        # replayed into DMI + base, so a fresh start seeds on the first candle and
+        # a restart rebuilds the exact indicator state mid-session.
         bars = await self.ibkr.fetch_5min_bars_range(
-            winner, start_ny=anchor_ny - timedelta(days=WARMUP_DAYS), end_ny=anchor_ny)
+            winner, start_ny=start_ny - timedelta(days=WARMUP_DAYS), end_ny=upto)
+        # drop a possibly-forming final bar (not yet closed)
+        bars = [b for b in bars if _bar_open_ny(b) + timedelta(minutes=5) <= upto]
+        if not bars:
+            logger.warning(f"[coil] {winner}: no bars to warm up; skipping")
+            return
         cpr = self._cpr(bars, anchor_ny)
         piv = compute_pivots(cpr.high, cpr.low, cpr.close)
-        upu = await self._usd_per_price_unit(winner, anchor_ny)
+        upu = recovered.usd_per_price_unit if recovered else await self._usd_per_price_unit(winner, anchor_ny)
         stop_dist = self.risk / upu
 
         dmi = DMI(self.params.di_len, self.params.adx_len)
         for b in bars:
             dmi.update(float(b.high), float(b.low), float(b.close))
         base = CoilBase()
-        # seed base from the just-closed first candle
-        fb = bars[-1]
-        base.update(float(fb.high), float(fb.low), float(fb.close), piv)
+        for b in bars:
+            if _bar_open_ny(b) >= start_ny:
+                base.update(float(b.high), float(b.low), float(b.close), piv)
+
+        if recovered:
+            self.om.adopt(recovered)
 
         quote = await self.ibkr.subscribe_spot_quote(winner)
         watcher = asyncio.create_task(self._breakeven_watcher(quote))
@@ -157,6 +179,68 @@ class CoilRuntime:
             watcher.cancel()
             await self._teardown_open("session_end")
             await self.ibkr.cancel_spot_quote(winner)
+
+    async def _recover(self) -> Optional[Tuple[Session, object, OpenTrade]]:
+        """On startup, reconcile any open CFD position from IBKR and rebuild the
+        trade (+ its resting stop) so the runtime resumes managing it. Returns
+        (session, sdate, OpenTrade) to resume, or None if flat / not resumable."""
+        try:
+            positions = await self.ibkr.get_open_positions()
+        except Exception:
+            logger.exception("[coil] recover: get_open_positions failed")
+            return None
+        mine = [p for p in positions
+                if getattr(p, "account", None) == self.config.cfd_account
+                and getattr(p.contract, "secType", None) == "CFD"
+                and abs(p.position) > 1e-9]
+        if not mine:
+            logger.info("[coil] startup: flat, nothing to recover")
+            return None
+
+        p = mine[0]
+        sym = (p.contract.symbol + p.contract.currency).upper()
+        side = 1 if p.position > 0 else -1
+        units = int(round(abs(p.position)))
+        entry = float(p.avgCost) if p.avgCost else 0.0
+        logger.warning(f"[coil] RECOVER open position {sym} side={side} units={units} entry~{entry}")
+
+        now_ist = ny_now().astimezone(IST)
+        act = active_session(now_ist, self.sessions)
+        if not act or sym not in act[0].pairs:
+            logger.warning(f"[coil] {sym} not in an active session -> closing orphan position")
+            await self.ibkr.place_cfd_market(
+                sym, "SELL" if side > 0 else "BUY", units, self.config.cfd_account)
+            return None
+        session, sdate = act
+        anchor_ny = first_candle_close(session, sdate).astimezone(NY)
+        try:
+            upu = await self._usd_per_price_unit(sym, anchor_ny)
+        except Exception:
+            logger.exception("[coil] recover: upu failed; using units")
+            upu = float(units)
+        stop_dist = self.risk / upu
+
+        # find the existing resting stop, else place a fresh one (never unprotected)
+        stop_trade, stop_px, armed = None, None, False
+        for t in await self.ibkr.open_trades():
+            c, o = t.contract, t.order
+            if (getattr(c, "secType", None) == "CFD"
+                    and (c.symbol + c.currency).upper() == sym
+                    and getattr(o, "orderType", "") in ("STP", "STOP")):
+                stop_trade = t
+                stop_px = float(getattr(o, "auxPrice", 0) or 0)
+                armed = stop_px > 0 and abs(stop_px - entry) <= max(1e-9, stop_dist * 0.1)
+                logger.warning(f"[coil] found resting stop @ {stop_px} armed={armed}")
+                break
+        if stop_trade is None:
+            stop_px = entry - stop_dist if side > 0 else entry + stop_dist
+            logger.warning(f"[coil] NO resting stop found -> placing fresh stop @ {stop_px}")
+            stop_trade = await self.ibkr.place_cfd_stop(
+                sym, "SELL" if side > 0 else "BUY", units, stop_px, self.config.cfd_account)
+            await self.ibkr.confirm_order_active(stop_trade)
+
+        trade = OpenTrade(sym, side, units, entry, stop_px or entry, upu, stop_trade, armed)
+        return session, sdate, trade
 
     async def _session_bar_loop(self, symbol, dmi, base, piv, stop_dist, upu,
                                 end_ny, noentry_ny, quote) -> None:

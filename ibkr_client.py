@@ -571,15 +571,58 @@ class IBKRClient:
         logger.info(f"[LIVE] stop modified -> {new_stop_price}")
 
     def cancel_order(self, trade) -> None:
-        """Cancel a resting order (the protective stop on reversal / session end)."""
+        """Cancel a resting order (the protective stop on reversal / session end).
+        Idempotent: if the order is already terminal we skip (avoids the spurious
+        'OrderId not found' 10147)."""
         if not self.config.LIVE_TRADING or not hasattr(trade, "order"):
             logger.info("[SHADOW] cancel order")
             return
+        st = getattr(getattr(trade, "orderStatus", None), "status", None)
+        if st in OrderStatus.DoneStates:
+            logger.info(f"[LIVE] stop already {st}; no cancel needed")
+            return
         try:
             self.ib.cancelOrder(trade.order)
-            logger.info("[LIVE] order cancelled")
+            logger.info("[LIVE] cancel sent")
         except Exception:
             logger.exception("cancelOrder failed")
+
+    async def confirm_order_active(self, trade, timeout_s: float = 3.0) -> bool:
+        """
+        Wait until a just-placed order is LIVE at IBKR (PreSubmitted/Submitted/
+        Filled). Returns False if it goes Cancelled/Inactive/ApiCancelled or never
+        acknowledges within `timeout_s`. Shadow (dry-run dict) -> True.
+
+        Used to guarantee a protective stop is really resting before we trust it.
+        """
+        if not self.config.LIVE_TRADING or not hasattr(trade, "orderStatus"):
+            return True
+        active = {"PreSubmitted", "Submitted", "Filled"}
+        dead = {"Cancelled", "ApiCancelled", "Inactive"}
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout_s
+        while loop.time() < deadline:
+            st = getattr(trade.orderStatus, "status", None)
+            if st in active:
+                return True
+            if st in dead:
+                logger.error(f"order went {st} (not active)")
+                return False
+            await asyncio.sleep(0.2)
+        st = getattr(trade.orderStatus, "status", None)
+        if st in active:
+            return True
+        logger.error(f"order never acknowledged active (last status={st})")
+        return False
+
+    async def open_trades(self) -> List[Any]:
+        """Current open orders as Trade objects - used on restart to find a
+        resting stop and re-adopt it."""
+        try:
+            await self.ib.reqAllOpenOrdersAsync()
+        except Exception:
+            logger.exception("reqAllOpenOrders failed")
+        return list(self.ib.openTrades())
 
     # ------------------------- live monitoring (spot ticks + PnL) -------------------------
     async def subscribe_spot_quote(self, symbol: str):

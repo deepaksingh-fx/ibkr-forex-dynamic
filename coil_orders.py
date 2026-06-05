@@ -80,10 +80,29 @@ class CoilOrderManager:
         stop_px = entry_px - stop_distance if direction > 0 else entry_px + stop_distance
         stop_trade = await self.ibkr.place_cfd_stop(
             symbol, self._close_side(direction), units, stop_px, self.account)
+
+        # SAFETY: never hold a position without a confirmed-live stop. If the stop
+        # fails to activate, flatten the just-opened position immediately.
+        if not await self.ibkr.confirm_order_active(stop_trade):
+            logger.error(f"PROTECTIVE STOP failed to activate for {symbol} -> "
+                         f"flattening the entry (no naked position)")
+            await self.ibkr.place_cfd_market(
+                symbol, self._close_side(direction), units, self.account)
+            return False
+
         self.trade = OpenTrade(symbol, direction, units, entry_px, stop_px,
                                usd_per_price_unit, stop_trade)
         logger.info(f"OPEN {symbol} dir={direction} entry={entry_px} stop={stop_px} units={units}")
         return True
+
+    def adopt(self, trade: OpenTrade) -> None:
+        """Take over a position recovered from IBKR on restart (with its stop)."""
+        if self.trade is not None:
+            logger.error("adopt() called while a trade is already open - ignored")
+            return
+        self.trade = trade
+        logger.warning(f"ADOPTED {trade.symbol} side={trade.side} entry={trade.entry_price} "
+                       f"stop={trade.stop_price} armed={trade.breakeven_armed}")
 
     def spot_pnl(self, spot_mid: float) -> float:
         """Unrealized USD PnL of the open trade from a SPOT mid price (proxy)."""

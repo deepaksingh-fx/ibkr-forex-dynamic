@@ -10,8 +10,9 @@ from coil_orders import CoilOrderManager
 
 
 class FakeIBKR:
-    def __init__(self):
+    def __init__(self, stop_active=True):
         self.calls = []
+        self.stop_active = stop_active
 
     async def place_cfd_market(self, symbol, side, units, account):
         self.calls.append(("market", symbol, side, units))
@@ -20,6 +21,10 @@ class FakeIBKR:
     async def place_cfd_stop(self, symbol, side, units, stop_price, account):
         self.calls.append(("stop", symbol, side, units, round(stop_price, 5)))
         return {"status": "dry_run"}
+
+    async def confirm_order_active(self, trade, timeout_s=3.0):
+        self.calls.append(("confirm",))
+        return self.stop_active
 
     def modify_stop(self, trade, price):
         self.calls.append(("modify", round(price, 5)))
@@ -38,6 +43,20 @@ async def test_open_long_places_market_then_stop():
     assert om.trade.stop_price == pytest.approx(99.8)      # 100 - 0.2 (long)
     assert ib.calls[0] == ("market", "NZDJPY", "BUY", 30000)
     assert ib.calls[1] == ("stop", "NZDJPY", "SELL", 30000, 99.8)  # protective SELL stop below
+
+
+async def test_open_flattens_if_stop_not_active():
+    # Stop fails to go live -> the entry must be flattened, no position left open.
+    ib = FakeIBKR(stop_active=False)
+    om = CoilOrderManager(ib, "ACC", breakeven_trigger=50.0)
+    ok = await om.open("NZDJPY", +1, 30000, ref_price=100.0, stop_distance=0.2,
+                       usd_per_price_unit=200.0)
+    assert ok is False
+    assert om.is_open is False
+    kinds = [c[0] for c in ib.calls]
+    assert kinds == ["market", "stop", "confirm", "market"]   # entry, stop, check, FLATTEN
+    assert ib.calls[0] == ("market", "NZDJPY", "BUY", 30000)   # entry
+    assert ib.calls[-1] == ("market", "NZDJPY", "SELL", 30000)  # flatten
 
 
 async def test_open_short_stop_is_above():
