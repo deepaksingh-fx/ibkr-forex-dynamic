@@ -45,8 +45,8 @@ SESSIONS: Tuple[Session, ...] = (
             ("AUDJPY", "NZDJPY", "AUDUSD", "NZDUSD", "USDJPY")),
     Session("London", time(12, 30), time(17, 30),
             ("GBPJPY", "EURJPY", "CHFJPY", "USDCHF")),
-    Session("LDN-NY Overlap", time(17, 30), time(21, 30),
-            ("EURUSD", "GBPUSD", "GBPJPY", "USDCHF")),
+    # LDN-NY Overlap intentionally emptied -> no selection, no trade this session.
+    Session("LDN-NY Overlap", time(17, 30), time(21, 30), ()),
     # New York intentionally has NO pairs -> no selection, no trade this session.
     Session("New York", time(21, 30), time(2, 30), ()),
 )

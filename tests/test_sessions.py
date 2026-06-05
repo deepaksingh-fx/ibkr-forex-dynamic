@@ -32,8 +32,8 @@ class TestSessionDefs:
         by_name = {s.name: s.pairs for s in SESSIONS}
         assert by_name["Asian"] == ("AUDJPY", "NZDJPY", "AUDUSD", "NZDUSD", "USDJPY")
         assert by_name["London"] == ("GBPJPY", "EURJPY", "CHFJPY", "USDCHF")
-        assert by_name["LDN-NY Overlap"] == ("EURUSD", "GBPUSD", "GBPJPY", "USDCHF")
-        assert by_name["New York"] == ()        # intentionally emptied -> no trade
+        assert by_name["LDN-NY Overlap"] == ()  # intentionally emptied -> no trade
+        assert by_name["New York"] == ()         # intentionally emptied -> no trade
 
 
 class TestSessionWindow:
