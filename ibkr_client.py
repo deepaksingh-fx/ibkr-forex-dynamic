@@ -577,8 +577,12 @@ class IBKRClient:
         return trade
 
     async def _cfd_min_tick(self, symbol: str) -> float:
-        """Minimum price increment for the CFD (cached). Falls back to JPY=0.001,
-        else 0.00001 if contract details are unavailable."""
+        """Minimum price increment for the CFD (cached, from reqContractDetails).
+
+        Fallback (only if the lookup fails) is deliberately COARSE - JPY=0.005,
+        else 0.00005 - because a price snapped to a coarser grid is still a valid
+        multiple of any finer real tick, whereas a too-fine guess can be rejected
+        (Error 110)."""
         if symbol in self._min_ticks:
             return self._min_ticks[symbol]
         tick = 0.0
@@ -590,7 +594,10 @@ class IBKRClient:
         except Exception:
             logger.exception(f"reqContractDetails({symbol}) failed; using fallback tick")
         if tick <= 0:
-            tick = 0.001 if symbol.upper().endswith("JPY") else 0.00001
+            tick = 0.005 if symbol.upper().endswith("JPY") else 0.00005
+            logger.warning(f"{symbol}: minTick unavailable, using coarse fallback {tick}")
+        else:
+            logger.info(f"{symbol}: minTick={tick}")
         self._min_ticks[symbol] = tick
         return tick
 
