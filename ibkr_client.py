@@ -517,6 +517,18 @@ class IBKRClient:
             return {"status": "rejected", "intent": intent, **{**empty, "error": str(e)}}
 
         final = await self._wait_for_terminal_status(trade, timeout_s)
+        if final != "Filled":
+            # Not filled in time. A market order left working can FILL LATE and
+            # orphan a position the caller thinks failed -> cancel it, then
+            # re-check in case it filled in the race.
+            logger.warning(f"[LIVE] CFD market not filled in {timeout_s}s ({final}); "
+                           f"cancelling to avoid a late fill: {intent}")
+            try:
+                self.ib.cancelOrder(trade.order)
+            except Exception:
+                logger.exception("cancel-after-timeout failed")
+            final = await self._wait_for_terminal_status(trade, 5.0)
+
         if final == "Filled":
             avg = getattr(trade.orderStatus, "avgFillPrice", None) or None
             qty = getattr(trade.orderStatus, "filled", 0) or 0
