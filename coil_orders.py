@@ -42,6 +42,8 @@ class OpenTrade:
 class CoilOrderManager:
     """One open CFD trade at a time, with a resting protective stop."""
 
+    MAX_STOP_TRIES = 3        # retry the protective stop before any last-resort flatten
+
     def __init__(self, ibkr: IBKRClient, account: str, breakeven_trigger: float):
         self.ibkr = ibkr
         self.account = account
@@ -78,16 +80,25 @@ class CoilOrderManager:
 
         entry_px = res.get("fill_price") or ref_price   # live: real fill; shadow: bar close
         stop_px = entry_px - stop_distance if direction > 0 else entry_px + stop_distance
-        stop_trade = await self.ibkr.place_cfd_stop(
-            symbol, self._close_side(direction), units, stop_px, self.account)
+        close_side = self._close_side(direction)
 
-        # SAFETY: never hold a position without a confirmed-live stop. If the stop
-        # fails to activate, flatten the just-opened position immediately.
-        if not await self.ibkr.confirm_order_active(stop_trade):
-            logger.error(f"PROTECTIVE STOP failed to activate for {symbol} -> "
-                         f"flattening the entry (no naked position)")
-            await self.ibkr.place_cfd_market(
-                symbol, self._close_side(direction), units, self.account)
+        # Place the protective stop and CONFIRM it is live. Stops rest fine on the
+        # CFD (verified live), so a miss is transient: keep the trade and RETRY the
+        # stop. Only if it genuinely cannot be placed after retries do we flatten
+        # (last resort) - we never hold a naked position, but we never abandon a
+        # good entry over a transient hiccup either.
+        stop_trade = None
+        for attempt in range(1, self.MAX_STOP_TRIES + 1):
+            stop_trade = await self.ibkr.place_cfd_stop(
+                symbol, close_side, units, stop_px, self.account)
+            if await self.ibkr.confirm_order_active(stop_trade):
+                break
+            logger.warning(f"protective stop not active for {symbol} "
+                           f"(attempt {attempt}/{self.MAX_STOP_TRIES}); retrying")
+        else:
+            logger.critical(f"STOP could not be placed for {symbol} after "
+                            f"{self.MAX_STOP_TRIES} tries -> flattening (last resort)")
+            await self.ibkr.place_cfd_market(symbol, close_side, units, self.account)
             return False
 
         self.trade = OpenTrade(symbol, direction, units, entry_px, stop_px,

@@ -45,18 +45,38 @@ async def test_open_long_places_market_then_stop():
     assert ib.calls[1] == ("stop", "NZDJPY", "SELL", 30000, 99.8)  # protective SELL stop below
 
 
-async def test_open_flattens_if_stop_not_active():
-    # Stop fails to go live -> the entry must be flattened, no position left open.
+async def test_open_retries_stop_then_flattens_as_last_resort():
+    # Stop never goes live -> retry MAX_STOP_TRIES times, THEN flatten (last resort).
     ib = FakeIBKR(stop_active=False)
     om = CoilOrderManager(ib, "ACC", breakeven_trigger=50.0)
     ok = await om.open("NZDJPY", +1, 30000, ref_price=100.0, stop_distance=0.2,
                        usd_per_price_unit=200.0)
-    assert ok is False
-    assert om.is_open is False
+    assert ok is False and om.is_open is False
     kinds = [c[0] for c in ib.calls]
-    assert kinds == ["market", "stop", "confirm", "market"]   # entry, stop, check, FLATTEN
-    assert ib.calls[0] == ("market", "NZDJPY", "BUY", 30000)   # entry
-    assert ib.calls[-1] == ("market", "NZDJPY", "SELL", 30000)  # flatten
+    assert kinds.count("stop") == om.MAX_STOP_TRIES        # retried, didn't abandon on first miss
+    assert kinds.count("confirm") == om.MAX_STOP_TRIES
+    assert ib.calls[0] == ("market", "NZDJPY", "BUY", 30000)    # entry placed
+    assert ib.calls[-1] == ("market", "NZDJPY", "SELL", 30000)  # flatten only as last resort
+
+
+async def test_open_keeps_trade_if_stop_activates_on_retry():
+    # Stop fails once then succeeds -> trade is kept (entry NOT deleted).
+    ib = FakeIBKR(stop_active=False)
+    om = CoilOrderManager(ib, "ACC", breakeven_trigger=50.0)
+
+    calls = {"n": 0}
+    base_confirm = ib.confirm_order_active
+
+    async def confirm(trade, timeout_s=3.0):
+        calls["n"] += 1
+        ib.calls.append(("confirm",))
+        return calls["n"] >= 2          # first attempt fails, second succeeds
+    ib.confirm_order_active = confirm
+
+    ok = await om.open("NZDJPY", +1, 30000, 100.0, 0.2, 200.0)
+    assert ok is True and om.is_open is True
+    assert [c[0] for c in ib.calls].count("stop") == 2     # retried once, then kept the trade
+    assert not any(c == ("market", "NZDJPY", "SELL", 30000) for c in ib.calls)  # NOT flattened
 
 
 async def test_open_short_stop_is_above():
