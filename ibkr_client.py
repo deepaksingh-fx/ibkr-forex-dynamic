@@ -37,6 +37,7 @@ class IBKRClient:
         self.config = config
         self.ib = IB()
         self._contracts: Dict[str, Contract] = {}
+        self._min_ticks: Dict[str, float] = {}    # CFD symbol -> minimum price increment
 
     # ------------------------- lifecycle -------------------------
     async def connect(self) -> None:
@@ -556,8 +557,12 @@ class IBKRClient:
         """
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be BUY|SELL, got {side!r}")
+        # Round the trigger to the contract's tick - an off-tick price is rejected
+        # with Error 110 ("does not conform to the minimum price variation").
+        tick = await self._cfd_min_tick(symbol)
+        stop_price = self._round_to_tick(stop_price, tick)
         intent = {"account": account, "symbol": symbol, "side": side, "units": units,
-                  "stop": stop_price, "kind": "CFD_STOP"}
+                  "stop": stop_price, "tick": tick, "kind": "CFD_STOP"}
         if not self.config.LIVE_TRADING:
             logger.info(f"[SHADOW] CFD stop: {intent}")
             return {"status": "dry_run", "intent": intent}
@@ -571,12 +576,44 @@ class IBKRClient:
         logger.info(f"[LIVE] CFD stop placed: {intent}")
         return trade
 
+    async def _cfd_min_tick(self, symbol: str) -> float:
+        """Minimum price increment for the CFD (cached). Falls back to JPY=0.001,
+        else 0.00001 if contract details are unavailable."""
+        if symbol in self._min_ticks:
+            return self._min_ticks[symbol]
+        tick = 0.0
+        try:
+            contract = await self.qualify_cfd(symbol)
+            cds = await self.ib.reqContractDetailsAsync(contract)
+            if cds:
+                tick = float(getattr(cds[0], "minTick", 0) or 0)
+        except Exception:
+            logger.exception(f"reqContractDetails({symbol}) failed; using fallback tick")
+        if tick <= 0:
+            tick = 0.001 if symbol.upper().endswith("JPY") else 0.00001
+        self._min_ticks[symbol] = tick
+        return tick
+
+    @staticmethod
+    def _round_to_tick(price: float, tick: float) -> float:
+        """Snap a price to the nearest multiple of `tick` (exact, no float dust)."""
+        if not tick or tick <= 0:
+            return price
+        from decimal import Decimal, ROUND_HALF_UP
+        t = Decimal(str(tick))
+        steps = (Decimal(str(price)) / t).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return float(steps * t)
+
     def modify_stop(self, trade, new_stop_price: float) -> None:
         """Move a resting stop (e.g. to breakeven). Re-places the SAME order id
-        with a new trigger price = modify-in-place."""
+        with a new trigger price = modify-in-place. Snaps to the contract tick."""
         if not self.config.LIVE_TRADING or not hasattr(trade, "order"):
             logger.info(f"[SHADOW] modify stop -> {new_stop_price}")
             return
+        sym = (trade.contract.symbol + trade.contract.currency).upper()
+        tick = self._min_ticks.get(sym)
+        if tick:
+            new_stop_price = self._round_to_tick(new_stop_price, tick)
         order = trade.order
         order.auxPrice = new_stop_price
         self.ib.placeOrder(trade.contract, order)
