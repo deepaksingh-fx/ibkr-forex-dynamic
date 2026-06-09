@@ -43,6 +43,7 @@ class CoilOrderManager:
     """One open CFD trade at a time, with a resting protective stop."""
 
     MAX_STOP_TRIES = 3        # retry the protective stop before any last-resort flatten
+    MAX_CLOSE_TRIES = 3       # retry a close fill before giving up (position stays protected)
 
     def __init__(self, ibkr: IBKRClient, account: str, breakeven_trigger: float):
         self.ibkr = ibkr
@@ -136,16 +137,34 @@ class CoilOrderManager:
             return True
         return False
 
-    async def close(self, reason: str) -> Optional[float]:
-        """Cancel the resting stop and market-close the position on the CFD.
-        Returns the close fill price (or None in shadow). Clears the open trade."""
+    async def close(self, reason: str) -> bool:
+        """
+        Market-close the position on the CFD. Returns True iff the close actually
+        FILLED (position now flat). Order of operations is safety-critical:
+
+          1. send the closing market order and CONFIRM it filled (retry a few
+             times - CFD fills can lag),
+          2. only AFTER a confirmed fill, cancel the resting stop and mark flat.
+
+        If the close never fills we return False WITHOUT marking flat and WITHOUT
+        cancelling the stop - the position is still open and still protected. The
+        caller must not reverse or assume flat. This prevents the desync where a
+        timed-out close was treated as done and the reverse netted the old
+        position. (The earlier bug.)
+        """
         t = self.trade
         if t is None:
-            return None
-        self.ibkr.cancel_order(t.stop_trade)            # never leave a naked stop
-        res = await self.ibkr.place_cfd_market(
-            t.symbol, self._close_side(t.side), t.units, self.account)
-        px = res.get("fill_price")
-        logger.info(f"CLOSE {t.symbol} ({reason}) fill={px}")
-        self.trade = None
-        return px
+            return True                                   # already flat
+        for attempt in range(1, self.MAX_CLOSE_TRIES + 1):
+            res = await self.ibkr.place_cfd_market(
+                t.symbol, self._close_side(t.side), t.units, self.account)
+            if res["status"] in ("filled", "dry_run"):
+                self.ibkr.cancel_order(t.stop_trade)      # safe now - we are flat
+                logger.info(f"CLOSE {t.symbol} ({reason}) fill={res.get('fill_price')}")
+                self.trade = None
+                return True
+            logger.warning(f"close not filled for {t.symbol} ({res['status']}), "
+                           f"attempt {attempt}/{self.MAX_CLOSE_TRIES}; position still open")
+        logger.critical(f"COULD NOT CLOSE {t.symbol} after {self.MAX_CLOSE_TRIES} tries - "
+                        f"position STILL OPEN, stop STILL resting, NOT marking flat")
+        return False

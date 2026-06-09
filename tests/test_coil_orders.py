@@ -10,12 +10,15 @@ from coil_orders import CoilOrderManager
 
 
 class FakeIBKR:
-    def __init__(self, stop_active=True):
+    def __init__(self, stop_active=True, market_fills=True):
         self.calls = []
         self.stop_active = stop_active
+        self.market_fills = market_fills
 
     async def place_cfd_market(self, symbol, side, units, account):
         self.calls.append(("market", symbol, side, units))
+        if not self.market_fills:
+            return {"status": "timeout", "fill_price": None, "fill_qty": None, "trade": None}
         return {"status": "dry_run", "fill_price": None, "fill_qty": None, "trade": None}
 
     async def place_cfd_stop(self, symbol, side, units, stop_price, account):
@@ -113,15 +116,30 @@ async def test_breakeven_arms_and_latches():
     assert om.arm_breakeven_if_touched(100.5) is False
 
 
-async def test_close_cancels_stop_then_market_closes():
+async def test_close_market_closes_then_cancels_stop():
     ib = FakeIBKR()
     om = CoilOrderManager(ib, "ACC", breakeven_trigger=50.0)
     await om.open("NZDJPY", +1, 30000, 100.0, 0.2, 200.0)
     ib.calls.clear()
-    await om.close("session_end")
-    assert ib.calls[0] == ("cancel",)                      # stop cancelled FIRST (no naked stop)
-    assert ib.calls[1] == ("market", "NZDJPY", "SELL", 30000)   # then close the long
-    assert om.is_open is False
+    ok = await om.close("session_end")
+    assert ok is True and om.is_open is False
+    assert ib.calls[0] == ("market", "NZDJPY", "SELL", 30000)   # close FIRST (confirm fill)
+    assert ("cancel",) in ib.calls                              # stop cancelled only AFTER fill
+
+
+async def test_close_that_never_fills_keeps_position_and_stop():
+    # The desync bug: a close that doesn't fill must NOT mark flat or cancel the stop.
+    ib = FakeIBKR()
+    om = CoilOrderManager(ib, "ACC", breakeven_trigger=50.0)
+    await om.open("NZDJPY", +1, 30000, 100.0, 0.2, 200.0)
+    ib.calls.clear()
+    ib.market_fills = False                                # CFD won't fill the close
+    ok = await om.close("opp_signal")
+    assert ok is False                                    # reported NOT closed
+    assert om.is_open is True                             # still holding the position
+    assert om.trade.side == 1
+    assert ("cancel",) not in ib.calls                    # stop was NOT cancelled (still protected)
+    assert [c[0] for c in ib.calls].count("market") == om.MAX_CLOSE_TRIES  # retried
 
 
 async def test_spot_pnl_sign():

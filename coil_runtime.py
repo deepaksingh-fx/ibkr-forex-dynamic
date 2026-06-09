@@ -292,9 +292,12 @@ class CoilRuntime:
         if self.om.is_open:
             pos = self.om.trade.side
             if reverse_signal(pos, bias, plus, minus):
-                await self.om.close("opp_signal")
-                if not no_new:
-                    await self.om.open(symbol, -pos, self.config.cfd_units, c, stop_dist, upu)
+                if await self.om.close("opp_signal"):
+                    if not no_new:
+                        await self.om.open(symbol, -pos, self.config.cfd_units, c, stop_dist, upu)
+                else:
+                    logger.critical("[coil] reverse ABORTED: close did not fill; "
+                                    "holding the position + stop (no desync)")
         # entry when flat
         if not self.om.is_open and not no_new:
             d = entry_dir(bias, plus, minus)
@@ -302,7 +305,8 @@ class CoilRuntime:
                 await self.om.open(symbol, d, self.config.cfd_units, c, stop_dist, upu)
         # session-end force-flat
         if is_end and self.om.is_open:
-            await self.om.close("session_end")
+            if not await self.om.close("session_end"):
+                logger.critical("[coil] session-end close did NOT fill; position still open (stop resting)")
 
     async def _breakeven_watcher(self, quote) -> None:
         """Poll the spot quote ~1/s; arm breakeven the instant PnL touches it."""
@@ -371,6 +375,8 @@ class CoilRuntime:
     async def _teardown_open(self, reason: str) -> None:
         if self.om.is_open:
             try:
-                await self.om.close(reason)
+                if not await self.om.close(reason):
+                    logger.critical(f"[coil] teardown ({reason}): close did NOT fill; "
+                                    f"position STILL OPEN with stop resting - check manually")
             except Exception:
                 logger.exception(f"[coil] teardown close failed ({reason})")
