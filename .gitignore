@@ -38,3 +38,5 @@ env/
 coil_trades_*.xlsx
 coil_bt_cache_*.json
 ~$*.xlsx
+barcache/
+coil_2month*.xlsx

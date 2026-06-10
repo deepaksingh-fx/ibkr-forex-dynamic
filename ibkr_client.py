@@ -144,6 +144,7 @@ class IBKRClient:
         end_ny: datetime,
         duration_str: str = "1 D",
         use_cfd: bool = False,
+        what: str = "MIDPOINT",
     ) -> List[Any]:
         # use_cfd=True fetches from the SMART CFD contract (the instrument we
         # actually trade); default False keeps the IDEALPRO spot source used by
@@ -155,7 +156,7 @@ class IBKRClient:
             endDateTime=end_utc,
             durationStr=duration_str,
             barSizeSetting="5 mins",
-            whatToShow="MIDPOINT",
+            whatToShow=what,
             useRTH=False,
             formatDate=2,
         )
@@ -229,6 +230,7 @@ class IBKRClient:
         max_retries: int = 3,
         retry_backoff_s: float = 2.0,
         use_cfd: bool = False,
+        what: str = "MIDPOINT",
     ) -> List[Any]:
         """
         Fetch all 5-min bars across [start_ny, end_ny] by pagination.
@@ -258,7 +260,7 @@ class IBKRClient:
             chunk = []
             for attempt in range(max_retries + 1):
                 chunk = await self.fetch_5min_bars(
-                    symbol, end_ny=cursor, duration_str=duration_str, use_cfd=use_cfd)
+                    symbol, end_ny=cursor, duration_str=duration_str, use_cfd=use_cfd, what=what)
                 if chunk:
                     break
                 if attempt < max_retries:

@@ -153,7 +153,7 @@ async def _usd_per_price_unit(ibkr: IBKRClient, symbol: str, at_ny: datetime, un
 
 
 async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, units, risk,
-                       breakeven, day_state, bars_all) -> list[dict]:
+                       breakeven, day_state, bars_all, commission) -> list[dict]:
     """Select + replay one session for the selected pair. Appends to blotter rows."""
     rows: list[dict] = []
     # --- 1. selection (real) ---
@@ -180,6 +180,15 @@ async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, unit
         rows.append({"session": session.name, "note": f"{winner}: no session bars"})
         return rows
 
+    # BID/ASK session bars -> REAL fills: buy at the ASK, sell at the BID (models
+    # the spread crossed on every market order).
+    bid_bars = await ibkr.fetch_5min_bars_range(
+        winner, start_ny=start_ny, end_ny=end_ny, use_cfd=False, what="BID")
+    ask_bars = await ibkr.fetch_5min_bars_range(
+        winner, start_ny=start_ny, end_ny=end_ny, use_cfd=False, what="ASK")
+    bid_close = {_bar_open_ny(b).isoformat(): float(b.close) for b in bid_bars}
+    ask_close = {_bar_open_ny(b).isoformat(): float(b.close) for b in ask_bars}
+
     upu = await _usd_per_price_unit(ibkr, winner, start_ny, units)   # USD per 1.0 price move
     stop_dist = risk / upu                                            # price units
     pnl = lambda side, entry, px: side * (px - entry) * upu
@@ -196,7 +205,8 @@ async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, unit
 
     def realize(px, action, ts, reason):
         nonlocal pos, entry, stop, be_armed
-        p = pnl(pos, entry, px)
+        # gross PnL minus round-trip commission (open + close = 2 orders).
+        p = pnl(pos, entry, px) - 2.0 * commission
         day_state["realized"] += p
         rows.append({"session": session.name, "sym": winner, "t": ts, "action": action,
                      "side": "L" if pos > 0 else "S", "px": px, "pnl": p,
@@ -209,6 +219,8 @@ async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, unit
         o, h, l, c = float(b.open), float(b.high), float(b.low), float(b.close)
         open_ny = _bar_open_ny(b)
         ts = open_ny.astimezone(IST).strftime("%H:%M")
+        ask_px = ask_close.get(open_ny.isoformat(), c)   # buy fills here
+        bid_px = bid_close.get(open_ny.isoformat(), c)   # sell fills here
         plus, minus, adx = dmi.update(h, l, c)
         is_first = base.update(h, l, c, piv)
         is_end = (i == n - 1)
@@ -232,11 +244,24 @@ async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, unit
             _log_bar(row_start)
             continue
 
-        # (1) intrabar protective stop, checked first (conservative)
+        # (1) intrabar protective exit, checked first against the candle wick:
+        #     the per-trade stop AND the daily-cap level (realized + UNREALIZED),
+        #     whichever the adverse wick reaches first. Exit at that exact price.
         if pos != 0 and stop is not None:
+            remaining = day_state["limit"] + day_state["realized"]   # $ left before the daily cap
+            daily_stop = entry - remaining / upu if pos > 0 else entry + remaining / upu
+            if pos > 0:
+                binding = max(stop, daily_stop); is_daily = daily_stop >= stop
+            else:
+                binding = min(stop, daily_stop); is_daily = daily_stop <= stop
             adverse = l if pos > 0 else h
-            if (pos > 0 and adverse <= stop) or (pos < 0 and adverse >= stop):
-                realize(stop, "STOP_OUT", ts, "stop")
+            if (pos > 0 and adverse <= binding) or (pos < 0 and adverse >= binding):
+                realize(binding, "EXIT_DAILY_LIMIT" if is_daily else "STOP_OUT", ts,
+                        "daily_limit" if is_daily else "stop")
+                if is_daily:
+                    day_state["halted"] = True
+                    _log_bar(row_start)
+                    break
         # (2) breakeven latch on favourable extreme
         if pos != 0 and not be_armed:
             fav = h if pos > 0 else l
@@ -249,24 +274,26 @@ async def _run_session(ibkr: IBKRClient, session: Session, d: date, params, unit
         bias = base.bias(c)
         if pos != 0 and reverse_signal(pos, bias, plus, minus):
             old = pos
-            realize(c, "EXIT_SIGNAL", ts, "opp_signal")
+            realize(bid_px if old > 0 else ask_px, "EXIT_SIGNAL", ts, "opp_signal")  # close long@bid / short@ask
             if not no_new:
-                pos = -old; entry = c
-                stop = c - stop_dist if pos > 0 else c + stop_dist
+                pos = -old
+                entry = ask_px if pos > 0 else bid_px                # open long@ask / short@bid
+                stop = entry - stop_dist if pos > 0 else entry + stop_dist
                 rows.append({"session": session.name, "sym": winner, "t": ts, "action": "REVERSE",
-                             "side": "L" if pos > 0 else "S", "px": c, "pnl": 0.0,
+                             "side": "L" if pos > 0 else "S", "px": entry, "pnl": 0.0,
                              "base": f"{base.name}", "reason": "stop_reverse"})
         if pos == 0 and not is_first and not no_new:
             d_ = entry_dir(bias, plus, minus)
             if d_:
-                pos = d_; entry = c
-                stop = c - stop_dist if pos > 0 else c + stop_dist
+                pos = d_
+                entry = ask_px if pos > 0 else bid_px               # open long@ask / short@bid
+                stop = entry - stop_dist if pos > 0 else entry + stop_dist
                 rows.append({"session": session.name, "sym": winner, "t": ts, "action": "ENTRY",
-                             "side": "L" if pos > 0 else "S", "px": c, "pnl": 0.0,
+                             "side": "L" if pos > 0 else "S", "px": entry, "pnl": 0.0,
                              "base": f"{base.name}", "reason": "gates_align"})
         # (4) session-end force-flat
         if is_end and pos != 0:
-            realize(c, "EXIT_EOD", ts, "session_end")
+            realize(bid_px if pos > 0 else ask_px, "EXIT_EOD", ts, "session_end")  # close long@bid / short@ask
 
         _log_bar(row_start)
 
@@ -283,9 +310,13 @@ async def run(args) -> None:
     sessions, params, _feed = load_coil_config(args.config)
     d = (datetime.strptime(args.date, "%Y-%m-%d").date() if args.date
          else (datetime.now(IST) - timedelta(days=1)).date())
-    cfg = StrategyConfig(ibkr=IBKRConnection(
-        host=args.host, port=args.port, client_id=args.client_id, read_only=True))
-    ibkr = IBKRClient(cfg)
+    if getattr(args, "offline", False):
+        from bar_cache import CachedBars
+        ibkr = CachedBars()                      # reads bars from local cache, no IBKR
+    else:
+        cfg = StrategyConfig(ibkr=IBKRConnection(
+            host=args.host, port=args.port, client_id=args.client_id, read_only=True))
+        ibkr = IBKRClient(cfg)
     await ibkr.connect()
     day_state = {"realized": 0.0, "limit": args.daily_limit, "halted": False}
     blotter: list[dict] = []
@@ -296,7 +327,8 @@ async def run(args) -> None:
                 blotter.append({"session": session.name, "note": "halted (daily limit)"})
                 continue
             blotter += await _run_session(ibkr, session, d, params, args.units,
-                                          args.risk, args.breakeven, day_state, bars_all)
+                                          args.risk, args.breakeven, day_state, bars_all,
+                                          args.commission)
     finally:
         await ibkr.disconnect()
 
@@ -338,12 +370,14 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Coil/session strategy shadow backtest (no orders)")
     p.add_argument("--date", help="IST date YYYY-MM-DD (default: yesterday IST)")
     p.add_argument("--config", help="JSON config (sessions + params)")
+    p.add_argument("--offline", action="store_true", help="Use local bar cache (no IBKR)")
     p.add_argument("--excel", help="Output .xlsx path (default: coil_trades_<date>.xlsx)")
     p.add_argument("--render-only", help="Rebuild the Excel from a cache JSON (no Gateway)")
     p.add_argument("--units", type=int, default=30000, help="Position size (base-ccy units)")
     p.add_argument("--risk", type=float, default=50.0, help="USD risked per trade")
     p.add_argument("--breakeven", type=float, default=50.0, help="USD profit that arms breakeven")
     p.add_argument("--daily-limit", type=float, default=150.0, help="USD daily loss cap")
+    p.add_argument("--commission", type=float, default=2.0, help="USD commission per order ($/fill)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=4001)
     p.add_argument("--client-id", type=int, default=71)
