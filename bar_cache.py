@@ -36,18 +36,23 @@ def _to_utc(dt) -> datetime:
 
 
 async def warm(ibkr, symbols, whats, start_ny, end_ny, force: bool = False,
-               pace_sleep_s: float = 11.0) -> None:
+               pace_sleep_s: float = 11.0, logfn=print) -> None:
     """Download each (symbol, what) full range from the real IBKR and cache to disk.
 
     pace_sleep_s defaults to 11s between chunks to stay under IBKR's ~60-requests/
     10-min historical limit (going faster trips a pacing PENALTY that throttles
-    the whole connection for minutes)."""
+    the whole connection for minutes). `logfn` receives per-series progress."""
+    import time as _t
     os.makedirs(CACHE_DIR, exist_ok=True)
+    total = len(symbols) * len(whats)
+    idx = 0
+    t0 = _t.time()
     for sym in symbols:
         for what in whats:
+            idx += 1
             p = _path(sym, what)
             if os.path.exists(p) and not force:
-                print(f"  cached already: {sym} {what}", flush=True)
+                logfn(f"[{idx}/{total}] already cached: {sym} {what}")
                 continue
             try:
                 bars = await ibkr.fetch_5min_bars_range(
@@ -56,16 +61,19 @@ async def warm(ibkr, symbols, whats, start_ny, end_ny, force: bool = False,
                 data = [{"t": b.date.isoformat() if hasattr(b.date, "isoformat") else str(b.date),
                          "o": float(b.open), "h": float(b.high), "l": float(b.low), "c": float(b.close)}
                         for b in bars]
+                el = (_t.time() - t0) / 60
                 # only persist a non-empty series (so a drop mid-fetch leaves no
                 # partial file -> a re-run cleanly retries it)
                 if data:
                     with open(p, "w") as f:
                         json.dump(data, f)
-                    print(f"  cached {sym} {what}: {len(data)} bars", flush=True)
+                    span = f"{data[0]['t'][:10]}..{data[-1]['t'][:10]}"
+                    logfn(f"[{idx}/{total}] cached {sym} {what}: {len(data)} bars ({span})  "
+                          f"elapsed {el:.0f}m")
                 else:
-                    print(f"  EMPTY {sym} {what} (no data / dropped) - will retry on re-run", flush=True)
+                    logfn(f"[{idx}/{total}] EMPTY {sym} {what} (dropped/unavailable) - will retry")
             except Exception as e:
-                print(f"  FAILED {sym} {what}: {e} - will retry on re-run", flush=True)
+                logfn(f"[{idx}/{total}] FAILED {sym} {what}: {e} - will retry")
 
 
 class CachedBars:
